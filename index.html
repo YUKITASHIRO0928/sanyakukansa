@@ -1,0 +1,1366 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>散薬調剤支援システム</title>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
+<style>
+@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700&display=swap');
+* { box-sizing: border-box; margin: 0; padding: 0; }
+input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+input[type=number] { -moz-appearance: textfield; }
+@keyframes shake {
+  0%, 100% { transform: translateX(0); }
+  20% { transform: translateX(-8px); }
+  40% { transform: translateX(8px); }
+  60% { transform: translateX(-4px); }
+  80% { transform: translateX(4px); }
+}
+</style>
+</head>
+<body>
+<div id="root"></div>
+<script type="text/babel">
+const { useState, useEffect, useRef, useCallback } = React;
+
+// ═══════════════════════════════════════════
+// GS-1 バーコードパーサー
+// ═══════════════════════════════════════════
+// AI(01) = GTIN 14桁固定
+// AI(17) = 有効期限 6桁固定 YYMMDD
+// AI(10) = ロット番号 可変長（最大20桁）FNC1区切り
+// AI(21) = シリアル番号 可変長（最大20桁）
+// AI(30) = 数量 可変長（最大8桁）
+
+const GS1_AI_DEFINITIONS = {
+  "01": { name: "GTIN", length: 14, fixed: true },
+  "10": { name: "LOT", length: 20, fixed: false },
+  "17": { name: "EXPIRY", length: 6, fixed: true },
+  "21": { name: "SERIAL", length: 20, fixed: false },
+  "30": { name: "QTY", length: 8, fixed: false },
+};
+
+const FNC1 = "\x1D"; // GS (Group Separator) = FNC1
+
+function parseGS1Barcode(raw) {
+  const result = { raw, gtin: null, gtin14: null, expiry: null, lot: null, serial: null, qty: null, errors: [] };
+  if (!raw || raw.length < 2) {
+    result.errors.push("バーコードデータが短すぎます");
+    return result;
+  }
+
+  // FNC1プレフィックスを除去（一部リーダーは ]C1 や ]e0 を付加）
+  let data = raw.replace(/^\]C1/, "").replace(/^\]e0/, "").replace(/^\]d2/, "");
+
+  let pos = 0;
+  const maxIter = 20;
+  let iter = 0;
+
+  while (pos < data.length && iter < maxIter) {
+    iter++;
+    // FNC1区切りをスキップ
+    if (data[pos] === FNC1) { pos++; continue; }
+
+    // AI を2桁で試行、なければ拡張AI（3-4桁）も試行
+    let ai = data.substring(pos, pos + 2);
+    let aiDef = GS1_AI_DEFINITIONS[ai];
+
+    if (!aiDef) {
+      // カッコ付き表記への対応 "(01)04987..."
+      if (data[pos] === "(") {
+        const closeIdx = data.indexOf(")", pos + 1);
+        if (closeIdx !== -1) {
+          ai = data.substring(pos + 1, closeIdx);
+          aiDef = GS1_AI_DEFINITIONS[ai];
+          pos = closeIdx + 1;
+          if (aiDef) {
+            // 下で値を読む
+          } else {
+            result.errors.push(`未対応AI: (${ai})`);
+            break;
+          }
+        } else {
+          break;
+        }
+      } else {
+        // 不明なAI → 残りを読み飛ばし
+        result.errors.push(`不明なAI: ${ai} (位置${pos})`);
+        break;
+      }
+    } else {
+      pos += ai.length;
+    }
+
+    if (!aiDef) break;
+
+    let value;
+    if (aiDef.fixed) {
+      value = data.substring(pos, pos + aiDef.length);
+      pos += aiDef.length;
+    } else {
+      // 可変長 → FNC1 or 文字列終端まで
+      const fnc1Idx = data.indexOf(FNC1, pos);
+      const end = fnc1Idx !== -1 ? fnc1Idx : data.length;
+      // カッコ付きの場合は次の(まで
+      const parenIdx = data.indexOf("(", pos);
+      const actualEnd = parenIdx !== -1 && parenIdx < end ? parenIdx : end;
+      value = data.substring(pos, actualEnd);
+      pos = actualEnd;
+    }
+
+    switch (aiDef.name) {
+      case "GTIN":
+        result.gtin = value;
+        // GTIN-14正規化（14桁に0パディング）
+        result.gtin14 = value.padStart(14, "0");
+        break;
+      case "EXPIRY":
+        if (value.length === 6) {
+          const yy = value.substring(0, 2);
+          const mm = value.substring(2, 4);
+          const dd = value.substring(4, 6);
+          const year = parseInt(yy) > 50 ? 1900 + parseInt(yy) : 2000 + parseInt(yy);
+          result.expiry = { raw: value, year, month: parseInt(mm), day: parseInt(dd) === 0 ? null : parseInt(dd), formatted: `${year}/${mm}${dd === "00" ? "" : "/" + dd}` };
+        }
+        break;
+      case "LOT": result.lot = value; break;
+      case "SERIAL": result.serial = value; break;
+      case "QTY": result.qty = parseInt(value); break;
+    }
+  }
+
+  return result;
+}
+
+// GTINからJAN(GTIN-13)部分を抽出：GTIN-14の場合、先頭1桁(インジケータ)を除いた13桁
+function gtin14ToJan(gtin14) {
+  if (!gtin14) return null;
+  const g = gtin14.padStart(14, "0");
+  // 先頭が0ならGTIN-13のリーディングゼロ→そのまま後ろ13桁がJAN
+  // 先頭が1-9ならインジケータ→2-13桁目がJANの1-12桁目（チェックデジットは異なる）
+  if (g[0] === "0") return g.substring(1);
+  // 販売包装のGTIN-14：2～13桁目がJANの1～12桁目と一致
+  return g.substring(1, 13) + calcCheckDigit(g.substring(1, 13));
+}
+
+function calcCheckDigit(code12) {
+  let sum = 0;
+  for (let i = 0; i < 12; i++) {
+    sum += parseInt(code12[i]) * (i % 2 === 0 ? 1 : 3);
+  }
+  return String((10 - (sum % 10)) % 10);
+}
+
+// ═══════════════════════════════════════════
+// MEDISマスターCSVパーサー
+// ═══════════════════════════════════════════
+// HOTコードマスターの主要カラム（使用許諾取得後にダウンロードするCSV）:
+// HOT9, 医薬品名称, YJコード, 薬価基準コード, レセ電コード, JANコード など
+// 実際のフォーマットはMEDIS提供仕様に準拠
+
+function parseDrugMasterCSV(csvText, mappingConfig) {
+  const lines = csvText.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return { drugs: [], errors: ["CSVが空または不正です"] };
+
+  const header = parseCSVLine(lines[0]);
+  const cfg = mappingConfig || autoDetectColumns(header);
+
+  if (!cfg.nameCol && cfg.nameCol !== 0) return { drugs: [], errors: ["薬品名カラムが見つかりません"] };
+
+  const drugs = [];
+  const errors = [];
+
+  for (let i = 1; i < lines.length; i++) {
+    try {
+      const cols = parseCSVLine(lines[i]);
+      const drug = {
+        name: cols[cfg.nameCol]?.trim() || "",
+        hot9: cfg.hot9Col != null ? cols[cfg.hot9Col]?.trim() : "",
+        yjCode: cfg.yjCol != null ? cols[cfg.yjCol]?.trim() : "",
+        janCode: cfg.janCol != null ? cols[cfg.janCol]?.trim() : "",
+        receiptCode: cfg.receiptCol != null ? cols[cfg.receiptCol]?.trim() : "",
+        yakkaCode: cfg.yakkaCol != null ? cols[cfg.yakkaCol]?.trim() : "",
+        gtin14: "",
+        unitName: cfg.unitCol != null ? cols[cfg.unitCol]?.trim() : "",
+        strength: cfg.strengthCol != null ? cols[cfg.strengthCol]?.trim() : "",
+      };
+
+      // JAN → GTIN-14 変換
+      if (drug.janCode && drug.janCode.length === 13) {
+        drug.gtin14 = "0" + drug.janCode;
+      }
+
+      if (drug.name) drugs.push(drug);
+    } catch (e) {
+      errors.push(`行${i + 1}: パースエラー`);
+    }
+  }
+
+  return { drugs, errors, header, mapping: cfg };
+}
+
+function parseCSVLine(line) {
+  const result = [];
+  let current = "";
+  let inQuotes = false;
+  for (let i = 0; i < line.length; i++) {
+    const ch = line[i];
+    if (inQuotes) {
+      if (ch === '"' && line[i + 1] === '"') { current += '"'; i++; }
+      else if (ch === '"') { inQuotes = false; }
+      else { current += ch; }
+    } else {
+      if (ch === '"') { inQuotes = true; }
+      else if (ch === ",") { result.push(current); current = ""; }
+      else { current += ch; }
+    }
+  }
+  result.push(current);
+  return result;
+}
+
+function autoDetectColumns(header) {
+  const cfg = {};
+  const lowerHeader = header.map((h) => h.toLowerCase().trim());
+  lowerHeader.forEach((h, i) => {
+    if (/医薬品名|薬品名|名称|drugname|name/.test(h)) cfg.nameCol = i;
+    if (/hot.*9|hot9/.test(h)) cfg.hot9Col = i;
+    if (/yj|個別医薬品/.test(h)) cfg.yjCol = i;
+    if (/jan|janコード/.test(h)) cfg.janCol = i;
+    if (/レセ電|レセプト電算|receipt/.test(h)) cfg.receiptCol = i;
+    if (/薬価基準|yakka/.test(h)) cfg.yakkaCol = i;
+    if (/単位|unit/.test(h)) cfg.unitCol = i;
+    if (/含量|力価|strength/.test(h)) cfg.strengthCol = i;
+  });
+  return cfg;
+}
+
+// ═══════════════════════════════════════════
+// NSIPS / JAHIS 処方CSV パーサー
+// ═══════════════════════════════════════════
+// JAHIS院外処方箋2次元シンボル記録条件規約 (CSV形式) に準拠
+// レコードNo.で種別を判別:
+//   1: バージョン, 5: 患者氏名, 6: 患者生年月日, 11: 患者カナ
+//   51: 医療機関, 61: 医師, 201: RP(処方グループ),
+//   211: 薬品, 281: 薬品補足, 301: 用法, 391: 処方服用注意
+// 薬品コード種別: 1=なし, 2=レセ電, 3=厚労省コード, 4=YJコード, 6=HOTコード, 7=一般名コード
+
+function parseNSIPSPrescriptionCSV(csvText) {
+  const lines = csvText.split(/\r?\n/).filter((l) => l.trim());
+  const result = { patients: [], errors: [], rawRecords: [] };
+
+  let currentPatient = null;
+  let currentRP = null;
+  let currentDrug = null;
+  let rpDrugs = [];
+  let allPrescriptions = [];
+  let patientMap = {};
+
+  for (let i = 0; i < lines.length; i++) {
+    const cols = parseCSVLine(lines[i]);
+    const recNo = parseInt(cols[0]);
+    result.rawRecords.push({ line: i + 1, recNo, cols });
+
+    switch (recNo) {
+      case 1: // バージョン
+        // JAHIS version info — skip
+        break;
+
+      case 5: // 患者氏名: 5,患者氏名
+        {
+          const name = (cols[1] || "").trim();
+          const key = name;
+          if (!patientMap[key]) {
+            currentPatient = {
+              id: `NSIPS-${Object.keys(patientMap).length + 1}`,
+              name,
+              kana: "",
+              age: 0,
+              gender: "",
+              prescriptionDate: new Date().toISOString().substring(0, 10),
+              doctor: "",
+              prescriptions: [],
+              source: "NSIPS",
+            };
+            patientMap[key] = currentPatient;
+          } else {
+            currentPatient = patientMap[key];
+          }
+        }
+        break;
+
+      case 6: // 患者生年月日: 6,元号,年月日,性別
+        if (currentPatient) {
+          const gender = cols[3];
+          currentPatient.gender = gender === "1" ? "男" : gender === "2" ? "女" : "";
+          // 年齢計算（簡易）
+          try {
+            const gengo = parseInt(cols[1]); // 1=明治,2=大正,3=昭和,4=平成,5=令和
+            const yymmdd = cols[2] || "";
+            if (yymmdd.length >= 6) {
+              const yy = parseInt(yymmdd.substring(0, 2));
+              const mm = parseInt(yymmdd.substring(2, 4));
+              const dd = parseInt(yymmdd.substring(4, 6));
+              const baseYear = { 1: 1867, 2: 1911, 3: 1925, 4: 1988, 5: 2018 }[gengo] || 2000;
+              const birthYear = baseYear + yy;
+              currentPatient.age = new Date().getFullYear() - birthYear;
+            }
+          } catch (e) {}
+        }
+        break;
+
+      case 11: // 患者カナ: 11,カナ
+        if (currentPatient) currentPatient.kana = (cols[1] || "").trim();
+        break;
+
+      case 51: // 医療機関: 51,医療機関コード,医療機関名称,…
+        // 処方日の抽出（cols[5]等に含まれる場合がある）
+        break;
+
+      case 61: // 医師: 61,医師カナ,医師漢字
+        if (currentPatient) currentPatient.doctor = (cols[2] || cols[1] || "").trim();
+        break;
+
+      case 101: // 処方箋番号レコード
+        break;
+
+      case 111: // 処方発行日: 111,YYYYMMDD or 元号式
+        if (currentPatient && cols[1]) {
+          const d = cols[1].trim();
+          if (d.length === 8) {
+            currentPatient.prescriptionDate = `${d.substring(0, 4)}-${d.substring(4, 6)}-${d.substring(6, 8)}`;
+          }
+        }
+        break;
+
+      case 201: // RP: 201,RP番号,剤形区分,…
+        currentRP = { rpNo: parseInt(cols[1]) || 0, drugs: [], usage: "" };
+        break;
+
+      case 211: // 薬品: 211,薬品コード種別,薬品コード,薬品名称,用量,…
+        {
+          const codeType = parseInt(cols[1]) || 0;
+          const code = (cols[2] || "").trim();
+          const drugName = (cols[3] || "").trim();
+          const dosageStr = (cols[4] || "").trim();
+          const dosage = parseFloat(dosageStr) || 0;
+          const unit = (cols[5] || "").trim() || "g";
+
+          currentDrug = {
+            drugName,
+            yjCode: codeType === 4 ? code : "",
+            hot9: codeType === 6 ? code : "",
+            receiptCode: codeType === 2 ? code : "",
+            codeType,
+            code,
+            dosage,
+            unit,
+            days: 0,
+            totalMg: 0,
+            totalG: 0,
+          };
+
+          if (currentRP) currentRP.drugs.push(currentDrug);
+        }
+        break;
+
+      case 281: // 薬品補足
+        break;
+
+      case 291: // 薬品単位変換
+        break;
+
+      case 301: // 用法: 301,用法コード種別,用法コード,用法名称,調剤数量(日数/回数)
+        {
+          const days = parseInt(cols[4]) || 0;
+          if (currentRP) {
+            currentRP.usage = (cols[3] || "").trim();
+            // 日数をRP内の全薬品に適用
+            currentRP.drugs.forEach((d) => {
+              d.days = days;
+              // totalG計算: 散薬の場合 dosage(1日量g) × days
+              // ※用量の単位がgの場合はそのまま計算、mgの場合は変換
+              if (d.unit === "g" || d.unit === "G") {
+                d.totalG = d.dosage * days;
+                d.totalMg = d.totalG * 1000;
+              } else if (d.unit === "mg" || d.unit === "MG") {
+                d.totalMg = d.dosage * days;
+                d.totalG = d.totalMg / 1000;
+              } else {
+                // デフォルト: dosageをgとして扱う
+                d.totalG = d.dosage * days;
+                d.totalMg = d.totalG * 1000;
+              }
+            });
+          }
+
+          // RPを確定 → 処方リストに追加
+          if (currentRP && currentPatient) {
+            currentRP.drugs.forEach((d) => {
+              currentPatient.prescriptions.push(d);
+            });
+          }
+          currentRP = null;
+        }
+        break;
+
+      case 391: // 処方服用注意
+        break;
+
+      case 501: // 備考
+        break;
+
+      default:
+        break;
+    }
+  }
+
+  result.patients = Object.values(patientMap).filter((p) => p.prescriptions.length > 0);
+  return result;
+}
+
+// 汎用NSIPS CSV（レセコン独自形式）のフレキシブルパーサー
+// ヘッダー行があるタブ区切り/カンマ区切りファイルに対応
+function parseGenericNSIPSCSV(csvText) {
+  const lines = csvText.split(/\r?\n/).filter((l) => l.trim());
+  if (lines.length < 2) return { patients: [], errors: ["データが空です"] };
+
+  // 先頭行がレコード番号（数字）で始まるか確認 → JAHIS形式
+  const firstField = lines[0].split(",")[0].trim();
+  if (/^\d+$/.test(firstField) && parseInt(firstField) <= 10) {
+    return parseNSIPSPrescriptionCSV(csvText);
+  }
+
+  // ヘッダー付きCSV → カラム名で自動検出
+  const sep = lines[0].includes("\t") ? "\t" : ",";
+  const header = lines[0].split(sep).map((h) => h.trim());
+  const lh = header.map((h) => h.toLowerCase());
+
+  const nameIdx = lh.findIndex((h) => /患者名|患者氏名|氏名|name/.test(h));
+  const drugIdx = lh.findIndex((h) => /薬品名|医薬品名|drug/.test(h));
+  const doseIdx = lh.findIndex((h) => /用量|1日量|dose/.test(h));
+  const daysIdx = lh.findIndex((h) => /日数|投与日数|days/.test(h));
+  const unitIdx = lh.findIndex((h) => /単位|unit/.test(h));
+  const yjIdx = lh.findIndex((h) => /yj|yjコード|個別医薬品/.test(h));
+  const hotIdx = lh.findIndex((h) => /hot/.test(h));
+  const recIdx = lh.findIndex((h) => /レセ電|レセプト/.test(h));
+  const kanaIdx = lh.findIndex((h) => /カナ|kana/.test(h));
+  const doctorIdx = lh.findIndex((h) => /医師|doctor/.test(h));
+  const dateIdx = lh.findIndex((h) => /処方日|日付|date/.test(h));
+
+  if (nameIdx === -1 || drugIdx === -1) {
+    return { patients: [], errors: ["患者名または薬品名カラムが見つかりません。カラム名を確認してください。"] };
+  }
+
+  const patientMap = {};
+  for (let i = 1; i < lines.length; i++) {
+    const cols = lines[i].split(sep);
+    const pName = (cols[nameIdx] || "").trim();
+    if (!pName) continue;
+
+    if (!patientMap[pName]) {
+      patientMap[pName] = {
+        id: `CSV-${Object.keys(patientMap).length + 1}`,
+        name: pName,
+        kana: kanaIdx >= 0 ? (cols[kanaIdx] || "").trim() : "",
+        age: 0, gender: "",
+        prescriptionDate: dateIdx >= 0 ? (cols[dateIdx] || "").trim() : new Date().toISOString().substring(0, 10),
+        doctor: doctorIdx >= 0 ? (cols[doctorIdx] || "").trim() : "",
+        prescriptions: [],
+        source: "CSV",
+      };
+    }
+
+    const dosage = parseFloat(cols[doseIdx] || "0") || 0;
+    const days = parseInt(cols[daysIdx] || "0") || 0;
+    const unit = unitIdx >= 0 ? (cols[unitIdx] || "g").trim() : "g";
+    let totalG, totalMg;
+    if (unit === "mg" || unit === "MG") {
+      totalMg = dosage * days; totalG = totalMg / 1000;
+    } else {
+      totalG = dosage * days; totalMg = totalG * 1000;
+    }
+
+    patientMap[pName].prescriptions.push({
+      drugName: (cols[drugIdx] || "").trim(),
+      yjCode: yjIdx >= 0 ? (cols[yjIdx] || "").trim() : "",
+      hot9: hotIdx >= 0 ? (cols[hotIdx] || "").trim() : "",
+      receiptCode: recIdx >= 0 ? (cols[recIdx] || "").trim() : "",
+      dosage, unit, days, totalMg, totalG,
+    });
+  }
+
+  return { patients: Object.values(patientMap).filter((p) => p.prescriptions.length > 0), errors: [] };
+}
+
+// ═══════════════════════════════════════════
+// 音声
+// ═══════════════════════════════════════════
+const playSound = (type) => {
+  try {
+    const ctx = new (window.AudioContext || window.webkitAudioContext)();
+    if (type === "success") {
+      [0, 0.15, 0.3].forEach((d) => {
+        const o = ctx.createOscillator(), g = ctx.createGain();
+        o.connect(g); g.connect(ctx.destination);
+        o.frequency.value = 2200; o.type = "sine";
+        g.gain.setValueAtTime(0, ctx.currentTime + d);
+        g.gain.linearRampToValueAtTime(0.3, ctx.currentTime + d + 0.02);
+        g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + d + 0.12);
+        o.start(ctx.currentTime + d); o.stop(ctx.currentTime + d + 0.15);
+      });
+    } else if (type === "confirm") {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.frequency.value = 880; o.type = "sine";
+      g.gain.setValueAtTime(0.3, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.5);
+      o.start(); o.stop(ctx.currentTime + 0.5);
+    } else if (type === "error") {
+      const o = ctx.createOscillator(), g = ctx.createGain();
+      o.connect(g); g.connect(ctx.destination);
+      o.frequency.value = 200; o.type = "square";
+      g.gain.setValueAtTime(0.3, ctx.currentTime);
+      g.gain.exponentialRampToValueAtTime(0.001, ctx.currentTime + 0.6);
+      o.start(); o.stop(ctx.currentTime + 0.6);
+    }
+  } catch (e) {}
+};
+
+// ═══════════════════════════════════════════
+// モックデータ
+// ═══════════════════════════════════════════
+const MOCK_PATIENTS = [
+  {
+    id: "P001", name: "田中 太郎", kana: "タナカ タロウ", age: 72, gender: "男",
+    prescriptionDate: "2026-03-09", doctor: "山田 一郎",
+    prescriptions: [
+      { yjCode: "2171022F1025", drugName: "アムロジピンOD錠5mg", dosage: 5.0, unit: "mg", days: 14, totalMg: 70.0, totalG: 0.070 },
+      { yjCode: "2149036F2025", drugName: "カルベジロール錠10mg", dosage: 10.0, unit: "mg", days: 14, totalMg: 140.0, totalG: 0.140 },
+      { yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 300.0, unit: "mg", days: 14, totalMg: 4200.0, totalG: 4.200 },
+    ],
+  },
+  {
+    id: "P002", name: "佐藤 花子", kana: "サトウ ハナコ", age: 65, gender: "女",
+    prescriptionDate: "2026-03-09", doctor: "山田 一郎",
+    prescriptions: [
+      { yjCode: "3332001F1074", drugName: "ワルファリンK錠1mg", dosage: 2.0, unit: "mg", days: 28, totalMg: 56.0, totalG: 0.056 },
+      { yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 500.0, unit: "mg", days: 28, totalMg: 14000.0, totalG: 14.000 },
+    ],
+  },
+];
+
+// ═══════════════════════════════════════════
+// メインApp
+// ═══════════════════════════════════════════
+const PAGES = { MASTER: "master", DISPENSING: "dispensing", HISTORY: "history" };
+const STEPS = { SELECT_PATIENT: 0, SCAN_DRUG: 1, WEIGHING: 2, COMPLETE: 3 };
+const TOLERANCE = 0.03;
+
+const C = {
+  bg: "#f0f4f8", card: "#ffffff", border: "#dde5ef", borderFocus: "#3b82f6",
+  text: "#1e293b", textSub: "#64748b", textMuted: "#94a3b8",
+  primary: "#3b82f6", primaryLight: "#eff6ff", primaryDark: "#1d4ed8",
+  success: "#10b981", successLight: "#ecfdf5", successBorder: "#6ee7b7",
+  warning: "#f59e0b", warningLight: "#fffbeb",
+  danger: "#ef4444", dangerLight: "#fef2f2",
+  headerBg: "linear-gradient(135deg, #3b82f6 0%, #2563eb 100%)",
+};
+
+function App() {
+  const [page, setPage] = useState(PAGES.DISPENSING);
+  const [drugMaster, setDrugMaster] = useState([]);
+  const [masterLoadInfo, setMasterLoadInfo] = useState(null);
+  const [nsipsPatients, setNsipsPatients] = useState([]);
+  const [nsipsLoadInfo, setNsipsLoadInfo] = useState(null);
+
+  // NSIPSサーバー接続
+  const [serverUrl, setServerUrl] = useState("http://localhost:3456");
+  const [serverStatus, setServerStatus] = useState("disconnected"); // disconnected, connecting, connected, error
+  const [serverFiles, setServerFiles] = useState([]);
+  const [selectedServerFile, setSelectedServerFile] = useState(null);
+  const wsRef = useRef(null);
+
+  // サーバー接続
+  const connectToServer = useCallback(async (baseUrl) => {
+    const cleanUrl = baseUrl.replace(/\/+$/, "");
+    setServerStatus("connecting");
+    try {
+      const res = await fetch(`${cleanUrl}/api/status`);
+      const data = await res.json();
+      if (data.status === "running") {
+        setServerStatus("connected");
+        // ファイル一覧取得
+        const filesRes = await fetch(`${cleanUrl}/api/files`);
+        const filesData = await filesRes.json();
+        setServerFiles(filesData.files || []);
+        // 履歴読込
+        loadHistoryFromServer(cleanUrl);
+        // WebSocket接続
+        const wsUrl = cleanUrl.replace(/^http/, "ws") + "/ws";
+        if (wsRef.current) { try { wsRef.current.close(); } catch (e) {} }
+        const ws = new WebSocket(wsUrl);
+        ws.onmessage = (ev) => {
+          try {
+            const msg = JSON.parse(ev.data);
+            if (msg.type === "files_updated") {
+              setServerFiles(msg.files || []);
+            }
+          } catch (e) {}
+        };
+        ws.onclose = () => setServerStatus("disconnected");
+        ws.onerror = () => setServerStatus("error");
+        wsRef.current = ws;
+      }
+    } catch (e) {
+      setServerStatus("error");
+    }
+  }, []);
+
+  // サーバーからファイル読み込み → 処方パース
+  const loadServerFile = useCallback(async (fileName) => {
+    const cleanUrl = serverUrl.replace(/\/+$/, "");
+    try {
+      const res = await fetch(`${cleanUrl}/api/file?name=${encodeURIComponent(fileName)}`);
+      const buf = await res.arrayBuffer();
+      // Shift_JIS → UTF-8 変換
+      const decoder = new TextDecoder("shift_jis");
+      const text = decoder.decode(buf);
+      const result = parseGenericNSIPSCSV(text);
+      if (result.patients.length > 0) {
+        setNsipsPatients(result.patients);
+        setNsipsLoadInfo({
+          filename: fileName,
+          patientCount: result.patients.length,
+          totalRx: result.patients.reduce((s, p) => s + p.prescriptions.length, 0),
+          errors: result.errors,
+          loadedAt: new Date().toISOString(),
+          source: "server",
+        });
+        setSelectedServerFile(fileName);
+      }
+    } catch (e) {
+      console.error("ファイル読込エラー:", e);
+    }
+  }, [serverUrl]);
+
+  // 患者リスト: NSIPS読込済なら優先、なければモック
+  const patients = nsipsPatients.length > 0 ? nsipsPatients : MOCK_PATIENTS;
+
+  // 調剤ステート
+  const [step, setStep] = useState(STEPS.SELECT_PATIENT);
+  const [selectedPatient, setSelectedPatient] = useState(null);
+  const [currentDrugIndex, setCurrentDrugIndex] = useState(0);
+  const [barcodeInput, setBarcodeInput] = useState("");
+  const [scaleValue, setScaleValue] = useState(0);
+  const [prevScaleValue, setPrevScaleValue] = useState(0);
+  const [isWithinTolerance, setIsWithinTolerance] = useState(false);
+  const [soundInterval, setSoundInterval] = useState(null);
+  const [confirmedDrugs, setConfirmedDrugs] = useState([]);
+  const [errorMsg, setErrorMsg] = useState("");
+  const [history, setHistory] = useState([]);
+  const [drugConfirmed, setDrugConfirmed] = useState(false);
+  const [lastScanResult, setLastScanResult] = useState(null);
+
+  const barcodeRef = useRef(null);
+  const scaleRef = useRef(null);
+  const toleranceRef = useRef(false);
+
+  const currentDrug = selectedPatient?.prescriptions[currentDrugIndex];
+
+  // 起動時にサーバー自動接続を試行
+  useEffect(() => {
+    connectToServer(serverUrl);
+  }, []);
+
+  // ── マスターCSV読み込み ──
+  const handleMasterFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result;
+      const result = parseDrugMasterCSV(text);
+      setDrugMaster(result.drugs);
+      setMasterLoadInfo({
+        filename: file.name,
+        count: result.drugs.length,
+        errors: result.errors,
+        header: result.header,
+        mapping: result.mapping,
+        loadedAt: new Date().toISOString(),
+      });
+    };
+    reader.readAsText(file, "Shift_JIS"); // MEDIS CSVはShift_JIS多い
+  };
+
+  // ── NSIPS処方CSV読み込み ──
+  const handleNSIPSFile = (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      const text = ev.target.result;
+      const result = parseGenericNSIPSCSV(text);
+      setNsipsPatients(result.patients);
+      setNsipsLoadInfo({
+        filename: file.name,
+        patientCount: result.patients.length,
+        totalRx: result.patients.reduce((s, p) => s + p.prescriptions.length, 0),
+        errors: result.errors,
+        loadedAt: new Date().toISOString(),
+      });
+    };
+    reader.readAsText(file, "Shift_JIS");
+  };
+
+  // ── GS-1照合 ──
+  const lookupDrugByGTIN = (gtin14) => {
+    return drugMaster.find((d) => d.gtin14 === gtin14);
+  };
+
+  const lookupDrugByYJ = (yjCode) => {
+    return drugMaster.find((d) => d.yjCode === yjCode);
+  };
+
+  // バーコードスキャン → GS-1パース → 照合
+  const handleBarcodeScan = () => {
+    setErrorMsg("");
+    setLastScanResult(null);
+    const raw = barcodeInput.trim();
+    if (!raw) return;
+
+    const parsed = parseGS1Barcode(raw);
+    setLastScanResult(parsed);
+
+    if (!parsed.gtin14 && !parsed.gtin) {
+      // GS-1形式でない場合、生の値をGTIN-14として扱う
+      const padded = raw.padStart(14, "0");
+      parsed.gtin14 = padded;
+    }
+
+    // 照合方法1: GTIN-14でマスター検索
+    const masterDrug = lookupDrugByGTIN(parsed.gtin14);
+
+    // 照合方法2: 処方のYJコードとマスターのYJコードで突き合わせ
+    if (currentDrug) {
+      let matched = false;
+
+      if (masterDrug) {
+        // マスターにGTINが見つかった → そのYJコードと処方のYJコードを比較
+        if (masterDrug.yjCode === currentDrug.yjCode) {
+          matched = true;
+        }
+        // YJコードの先頭9桁一致でも可（包装違い対応）
+        else if (masterDrug.yjCode?.substring(0, 9) === currentDrug.yjCode?.substring(0, 9)) {
+          matched = true;
+        }
+      }
+
+      // マスター未登録でもデモ用：GTINの下12桁がモック用コードと一致
+      if (!matched && !masterDrug) {
+        // デモモード: バーコード入力値がYJコードそのものなら通す
+        if (raw === currentDrug.yjCode) {
+          matched = true;
+        }
+      }
+
+      if (matched) {
+        playSound("confirm");
+        setStep(STEPS.WEIGHING);
+        setTimeout(() => scaleRef.current?.focus(), 100);
+      } else {
+        playSound("error");
+        const scannedName = masterDrug ? masterDrug.name : `GTIN: ${parsed.gtin14}`;
+        setErrorMsg(`薬剤不一致！\n読取: ${scannedName}\n処方: ${currentDrug.drugName}（YJ: ${currentDrug.yjCode}）`);
+        setBarcodeInput("");
+        setTimeout(() => barcodeRef.current?.focus(), 100);
+      }
+    }
+  };
+
+  // 秤量
+  const checkTolerance = useCallback((value) => {
+    if (!currentDrug) return false;
+    const diff = Math.abs(value - currentDrug.totalG);
+    return diff / currentDrug.totalG <= TOLERANCE;
+  }, [currentDrug]);
+
+  useEffect(() => {
+    if (step !== STEPS.WEIGHING || !currentDrug) return;
+    const within = checkTolerance(scaleValue);
+    setIsWithinTolerance(within);
+    toleranceRef.current = within;
+
+    if (prevScaleValue > 0 && scaleValue <= 0 && !drugConfirmed) {
+      if (toleranceRef.current || checkTolerance(prevScaleValue)) {
+        setDrugConfirmed(true);
+        playSound("confirm");
+        setConfirmedDrugs((prev) => [...prev, { ...currentDrug, measuredG: prevScaleValue, timestamp: new Date().toISOString() }]);
+        setTimeout(() => {
+          if (currentDrugIndex + 1 < selectedPatient.prescriptions.length) {
+            setCurrentDrugIndex((i) => i + 1);
+            setScaleValue(0); setPrevScaleValue(0); setDrugConfirmed(false);
+            setBarcodeInput(""); setLastScanResult(null); setStep(STEPS.SCAN_DRUG);
+          } else {
+            setStep(STEPS.COMPLETE);
+          }
+        }, 1200);
+      }
+    }
+  }, [scaleValue]);
+
+  useEffect(() => {
+    if (isWithinTolerance && step === STEPS.WEIGHING && !drugConfirmed) {
+      if (!soundInterval) { setSoundInterval(setInterval(() => playSound("success"), 500)); }
+    } else {
+      if (soundInterval) { clearInterval(soundInterval); setSoundInterval(null); }
+    }
+    return () => { if (soundInterval) clearInterval(soundInterval); };
+  }, [isWithinTolerance, step, drugConfirmed]);
+
+  const handleScaleInput = (e) => {
+    const val = parseFloat(e.target.value) || 0;
+    setPrevScaleValue(scaleValue);
+    setScaleValue(val);
+  };
+
+  const selectPatient = (p) => {
+    setSelectedPatient(p); setCurrentDrugIndex(0); setConfirmedDrugs([]);
+    setBarcodeInput(""); setScaleValue(0); setPrevScaleValue(0);
+    setDrugConfirmed(false); setErrorMsg(""); setLastScanResult(null);
+    setStep(STEPS.SCAN_DRUG);
+  };
+
+  const saveRecord = async () => {
+    const record = { id: `R${Date.now()}`, patient: selectedPatient, drugs: confirmedDrugs, completedAt: new Date().toISOString(), operator: "テスト薬剤師" };
+    // サーバー接続中ならAPI経由で永続保存
+    if (serverStatus === "connected") {
+      try {
+        const cleanUrl = serverUrl.replace(/\/+$/, "");
+        await fetch(`${cleanUrl}/api/history`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(record),
+        });
+      } catch (e) { console.error("履歴保存エラー:", e); }
+    }
+    setHistory((prev) => [record, ...prev]);
+    resetAll();
+  };
+
+  // サーバーから履歴を読み込む
+  const loadHistoryFromServer = useCallback(async (baseUrl) => {
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/history`);
+      const data = await res.json();
+      if (data.records) setHistory(data.records);
+    } catch (e) {}
+  }, []);
+
+  const resetAll = () => {
+    setStep(STEPS.SELECT_PATIENT); setSelectedPatient(null); setCurrentDrugIndex(0);
+    setConfirmedDrugs([]); setBarcodeInput(""); setScaleValue(0); setPrevScaleValue(0);
+    setDrugConfirmed(false); setErrorMsg(""); setLastScanResult(null);
+  };
+
+  useEffect(() => {
+    const handler = (e) => {
+      if (e.key === "Enter" && step === STEPS.SCAN_DRUG && barcodeInput.trim()) handleBarcodeScan();
+    };
+    window.addEventListener("keydown", handler);
+    return () => window.removeEventListener("keydown", handler);
+  }, [step, barcodeInput, currentDrug, drugMaster]);
+
+  const progressPercent = selectedPatient ? (confirmedDrugs.length / selectedPatient.prescriptions.length) * 100 : 0;
+
+  // ── スタイルヘルパー ──
+  const btnStyle = (active) => ({
+    background: active ? "rgba(255,255,255,0.25)" : "rgba(255,255,255,0.08)",
+    border: "1px solid rgba(255,255,255,0.3)", borderRadius: 8,
+    color: "#fff", padding: "8px 18px", cursor: "pointer", fontSize: 13, fontWeight: 600,
+    transition: "all 0.15s",
+  });
+
+  const cardStyle = {
+    background: C.card, border: `1px solid ${C.border}`, borderRadius: 14,
+    boxShadow: "0 1px 4px rgba(0,0,0,0.04)",
+  };
+
+  // ═══════════════════════════════════════════
+  // RENDER
+  // ═══════════════════════════════════════════
+  return (
+    <div style={{ minHeight: "100vh", background: C.bg, color: C.text, fontFamily: "'Noto Sans JP','Segoe UI',sans-serif" }}>
+      {/* HEADER */}
+      <header style={{ background: C.headerBg, padding: "12px 24px", display: "flex", alignItems: "center", justifyContent: "space-between", boxShadow: "0 2px 12px rgba(59,130,246,0.15)" }}>
+        <div style={{ display: "flex", alignItems: "center", gap: 14 }}>
+          <div style={{ width: 40, height: 40, borderRadius: 12, background: "rgba(255,255,255,0.2)", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 20 }}>⚖️</div>
+          <div>
+            <div style={{ fontSize: 17, fontWeight: 700, color: "#fff" }}>散薬調剤支援システム</div>
+            <div style={{ fontSize: 11, color: "rgba(255,255,255,0.65)" }}>v0.6 — オールインワン（サーバー配信＋履歴永続化）</div>
+          </div>
+        </div>
+        <nav style={{ display: "flex", gap: 8, alignItems: "center" }}>
+          <button onClick={() => setPage(PAGES.MASTER)} style={btnStyle(page === PAGES.MASTER)}>
+            📦 薬品マスター{drugMaster.length > 0 ? ` (${drugMaster.length})` : ""}
+          </button>
+          <button onClick={() => setPage(PAGES.DISPENSING)} style={btnStyle(page === PAGES.DISPENSING)}>⚖️ 調剤</button>
+          <button onClick={() => setPage(PAGES.HISTORY)} style={btnStyle(page === PAGES.HISTORY)}>
+            📋 履歴{history.length > 0 ? ` (${history.length})` : ""}
+          </button>
+        </nav>
+      </header>
+
+      <div style={{ maxWidth: 1100, margin: "0 auto", padding: "20px 24px" }}>
+
+        {/* ════════════════ マスター管理ページ ════════════════ */}
+        {page === PAGES.MASTER && (
+          <div>
+            <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>📦 薬品マスター管理</h2>
+
+            {/* アップロード */}
+            <div style={{ ...cardStyle, padding: 24, marginBottom: 20 }}>
+              <div style={{ fontSize: 15, fontWeight: 600, marginBottom: 12 }}>CSVファイルを読み込む</div>
+              <p style={{ fontSize: 13, color: C.textSub, marginBottom: 16, lineHeight: 1.7 }}>
+                MEDIS HOTコードマスター、または医薬品コード対応表（CSV形式）をアップロードしてください。
+                カラム名から自動的にHOT9・YJコード・JANコード・薬品名を検出します。
+                JANコード（13桁）からGTIN-14への変換は自動で行います。
+              </p>
+              <div style={{ display: "flex", gap: 12, alignItems: "center" }}>
+                <label style={{
+                  display: "inline-flex", alignItems: "center", gap: 8,
+                  background: C.primary, color: "#fff", padding: "10px 24px",
+                  borderRadius: 10, cursor: "pointer", fontSize: 14, fontWeight: 600,
+                  boxShadow: "0 2px 8px rgba(59,130,246,0.2)",
+                }}>
+                  📂 CSVファイルを選択
+                  <input type="file" accept=".csv,.tsv,.txt" onChange={handleMasterFile} style={{ display: "none" }} />
+                </label>
+                {masterLoadInfo && (
+                  <span style={{ fontSize: 13, color: C.success, fontWeight: 600 }}>
+                    ✅ {masterLoadInfo.filename} — {masterLoadInfo.count}件読込済
+                  </span>
+                )}
+              </div>
+              {masterLoadInfo?.errors?.length > 0 && (
+                <div style={{ marginTop: 12, fontSize: 12, color: C.danger }}>
+                  {masterLoadInfo.errors.map((e, i) => <div key={i}>⚠ {e}</div>)}
+                </div>
+              )}
+            </div>
+
+            {/* カラムマッピング情報 */}
+            {masterLoadInfo?.mapping && (
+              <div style={{ ...cardStyle, padding: 20, marginBottom: 20 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>検出されたカラムマッピング</div>
+                <div style={{ display: "flex", flexWrap: "wrap", gap: 8 }}>
+                  {[
+                    ["薬品名", masterLoadInfo.mapping.nameCol],
+                    ["HOT9", masterLoadInfo.mapping.hot9Col],
+                    ["YJコード", masterLoadInfo.mapping.yjCol],
+                    ["JANコード", masterLoadInfo.mapping.janCol],
+                    ["レセ電コード", masterLoadInfo.mapping.receiptCol],
+                    ["薬価基準コード", masterLoadInfo.mapping.yakkaCol],
+                  ].map(([label, col]) => (
+                    <span key={label} style={{
+                      padding: "4px 12px", borderRadius: 6, fontSize: 12,
+                      background: col != null ? C.successLight : "#f1f5f9",
+                      color: col != null ? C.success : C.textMuted,
+                      border: `1px solid ${col != null ? C.successBorder : C.border}`,
+                    }}>
+                      {label}: {col != null ? `列${col + 1} ✓` : "未検出"}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* GS-1パーサーテスト */}
+            <div style={{ ...cardStyle, padding: 20, marginBottom: 20 }}>
+              <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>🔍 GS-1バーコードテスト</div>
+              <p style={{ fontSize: 12, color: C.textSub, marginBottom: 10 }}>
+                バーコードデータを貼り付けてパース結果を確認できます。
+              </p>
+              <GS1Tester drugMaster={drugMaster} />
+            </div>
+
+            {/* マスター一覧（先頭20件） */}
+            {drugMaster.length > 0 && (
+              <div style={{ ...cardStyle, padding: 20 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, marginBottom: 10 }}>
+                  登録薬品一覧（先頭20件 / 全{drugMaster.length}件）
+                </div>
+                <div style={{ overflowX: "auto" }}>
+                  <table style={{ width: "100%", borderCollapse: "collapse", fontSize: 12 }}>
+                    <thead>
+                      <tr style={{ background: "#f8fafc" }}>
+                        {["薬品名", "HOT9", "YJコード", "JANコード", "GTIN-14"].map((h) => (
+                          <th key={h} style={{ padding: "8px 10px", textAlign: "left", borderBottom: `1px solid ${C.border}`, color: C.textSub, fontWeight: 600 }}>{h}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {drugMaster.slice(0, 20).map((d, i) => (
+                        <tr key={i} style={{ borderBottom: `1px solid ${C.border}` }}>
+                          <td style={{ padding: "8px 10px", fontWeight: 500 }}>{d.name}</td>
+                          <td style={{ padding: "8px 10px", fontFamily: "monospace", color: C.textSub }}>{d.hot9}</td>
+                          <td style={{ padding: "8px 10px", fontFamily: "monospace", color: C.textSub }}>{d.yjCode}</td>
+                          <td style={{ padding: "8px 10px", fontFamily: "monospace", color: C.textSub }}>{d.janCode}</td>
+                          <td style={{ padding: "8px 10px", fontFamily: "monospace", color: C.primary, fontSize: 11 }}>{d.gtin14}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ════════════════ 調剤ページ ════════════════ */}
+        {page === PAGES.DISPENSING && (
+          <div>
+            {/* マスター未読込の警告 */}
+            {drugMaster.length === 0 && (
+              <div style={{
+                ...cardStyle, padding: "14px 20px", marginBottom: 16,
+                background: C.warningLight, borderColor: "#fbbf24",
+              }}>
+                <span style={{ fontSize: 13, color: "#92400e" }}>
+                  ⚠ 薬品マスター未読込 — デモモードで動作中（YJコード直接入力で照合可）。
+                  <button onClick={() => setPage(PAGES.MASTER)} style={{ background: "none", border: "none", color: C.primary, cursor: "pointer", fontWeight: 600, textDecoration: "underline", marginLeft: 8 }}>マスター管理へ →</button>
+                </span>
+              </div>
+            )}
+
+            {/* NSIPS処方データ読込UI */}
+            {step === STEPS.SELECT_PATIENT && (
+              <div style={{ ...cardStyle, padding: "18px 20px", marginBottom: 16 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginBottom: 10 }}>📋 処方データ取込</div>
+
+                {/* サーバー接続 */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                  <input
+                    value={serverUrl}
+                    onChange={(e) => setServerUrl(e.target.value)}
+                    placeholder="http://localhost:3456"
+                    style={{ padding: "7px 12px", fontSize: 13, border: `1px solid ${C.border}`, borderRadius: 8, width: 260, outline: "none", fontFamily: "monospace" }}
+                  />
+                  <button onClick={() => connectToServer(serverUrl)} style={{
+                    padding: "7px 16px", fontSize: 13, fontWeight: 600, borderRadius: 8, cursor: "pointer", border: "none",
+                    background: serverStatus === "connected" ? C.successLight : C.primary,
+                    color: serverStatus === "connected" ? C.success : "#fff",
+                  }}>
+                    {serverStatus === "connecting" ? "接続中..." : serverStatus === "connected" ? "✅ 接続済" : "🔌 サーバー接続"}
+                  </button>
+                  {serverStatus === "error" && <span style={{ fontSize: 12, color: C.danger }}>❌ 接続失敗 — サーバーが起動しているか確認してください</span>}
+                </div>
+
+                {/* サーバー接続時: ファイル一覧 */}
+                {serverStatus === "connected" && serverFiles.length > 0 && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, color: C.textSub, marginBottom: 6 }}>NSIPSフォルダ内のファイル（クリックで読込）:</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {serverFiles.map((f) => (
+                        <button key={f.name} onClick={() => loadServerFile(f.name)} style={{
+                          padding: "6px 14px", fontSize: 12, borderRadius: 8, cursor: "pointer",
+                          border: `1px solid ${selectedServerFile === f.name ? C.primary : C.border}`,
+                          background: selectedServerFile === f.name ? C.primaryLight : C.bg,
+                          color: selectedServerFile === f.name ? C.primary : C.text,
+                          fontWeight: selectedServerFile === f.name ? 600 : 400,
+                        }}>
+                          📄 {f.name}
+                          <span style={{ fontSize: 10, color: C.textMuted, marginLeft: 6 }}>
+                            {(f.size / 1024).toFixed(1)}KB
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {serverStatus === "connected" && serverFiles.length === 0 && (
+                  <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 10 }}>
+                    NSIPSフォルダにCSVファイルがありません。レセコンで処方入力するとファイルが自動検出されます。
+                  </div>
+                )}
+
+                {/* 区切り線 */}
+                <div style={{ borderTop: `1px solid ${C.border}`, margin: "10px 0", paddingTop: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                    <div style={{ fontSize: 12, color: C.textSub }}>
+                      {nsipsLoadInfo
+                        ? <span style={{ color: C.success, fontWeight: 600 }}>✅ {nsipsLoadInfo.filename} — {nsipsLoadInfo.patientCount}名 {nsipsLoadInfo.totalRx}剤</span>
+                        : "または手動でCSVファイルをアップロード"
+                      }
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <label style={{
+                        display: "inline-flex", alignItems: "center", gap: 6,
+                        background: C.bg, color: C.textSub, padding: "6px 14px",
+                        borderRadius: 8, cursor: "pointer", fontSize: 12, border: `1px solid ${C.border}`,
+                      }}>
+                        📂 手動アップロード
+                        <input type="file" accept=".csv,.tsv,.txt" onChange={handleNSIPSFile} style={{ display: "none" }} />
+                      </label>
+                      {nsipsPatients.length > 0 && (
+                        <button onClick={() => { setNsipsPatients([]); setNsipsLoadInfo(null); setSelectedServerFile(null); }} style={{
+                          background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8,
+                          color: C.textSub, padding: "6px 14px", cursor: "pointer", fontSize: 12,
+                        }}>モックに戻す</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {/* STEP 0: 患者選択 */}
+            {step === STEPS.SELECT_PATIENT && (
+              <div>
+                <div style={{ textAlign: "center", margin: "32px 0 24px" }}>
+                  <div style={{ fontSize: 40, marginBottom: 8 }}>📂</div>
+                  <div style={{ fontSize: 16, fontWeight: 600 }}>患者を選択してください</div>
+                  <div style={{ fontSize: 13, color: C.textMuted }}>
+                    {nsipsPatients.length > 0 ? `NSIPS読込データ（${nsipsLoadInfo?.filename}）` : "NSIPSデータから取得（モックデータ）"}
+                  </div>
+                </div>
+                <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
+                  {patients.map((p) => (
+                    <button key={p.id} onClick={() => selectPatient(p)} style={{
+                      ...cardStyle, padding: "16px 22px", cursor: "pointer", textAlign: "left", color: C.text, transition: "all 0.15s",
+                    }} onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.primary; e.currentTarget.style.boxShadow = "0 2px 12px rgba(59,130,246,0.1)"; }}
+                       onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.04)"; }}>
+                      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                        <div>
+                          <div style={{ fontSize: 17, fontWeight: 700 }}>{p.name} <span style={{ fontSize: 13, color: C.textMuted, fontWeight: 400 }}>{p.kana}</span></div>
+                          <div style={{ fontSize: 13, color: C.textSub, marginTop: 3 }}>{p.age}歳 {p.gender} ／ {p.prescriptionDate} ／ {p.doctor} 医師</div>
+                        </div>
+                        <div style={{ background: C.primaryLight, borderRadius: 20, padding: "5px 14px", fontSize: 13, color: C.primary, fontWeight: 600 }}>{p.prescriptions.length}剤</div>
+                      </div>
+                      <div style={{ fontSize: 12, color: C.textMuted, marginTop: 6 }}>
+                        {p.prescriptions.map((rx) => rx.drugName).join("、")}
+                      </div>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            )}
+
+            {/* 患者情報バー + 進捗 + 処方一覧 */}
+            {selectedPatient && step !== STEPS.SELECT_PATIENT && (
+              <>
+                <div style={{ ...cardStyle, padding: "12px 18px", marginBottom: 12, display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                  <div style={{ display: "flex", alignItems: "center", gap: 10 }}>
+                    <div style={{ width: 34, height: 34, borderRadius: 9, background: C.primaryLight, color: C.primary, display: "flex", alignItems: "center", justifyContent: "center", fontSize: 15, fontWeight: 700 }}>{selectedPatient.name[0]}</div>
+                    <span style={{ fontSize: 15, fontWeight: 700 }}>{selectedPatient.name}</span>
+                    <span style={{ color: C.textMuted, fontSize: 13 }}>{selectedPatient.age}歳 {selectedPatient.gender}</span>
+                  </div>
+                  <button onClick={resetAll} style={{ background: C.dangerLight, border: `1px solid #fca5a5`, borderRadius: 8, color: C.danger, padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕ 中断</button>
+                </div>
+
+                <div style={{ background: "#e2e8f0", borderRadius: 8, height: 7, marginBottom: 14, overflow: "hidden" }}>
+                  <div style={{ height: "100%", borderRadius: 8, background: step === STEPS.COMPLETE ? `linear-gradient(90deg,${C.success},#34d399)` : `linear-gradient(90deg,${C.primary},#60a5fa)`, width: `${progressPercent}%`, transition: "width 0.5s" }} />
+                </div>
+
+                <div style={{ display: "grid", gridTemplateColumns: `repeat(${selectedPatient.prescriptions.length},1fr)`, gap: 8, marginBottom: 16 }}>
+                  {selectedPatient.prescriptions.map((rx, i) => {
+                    const done = i < confirmedDrugs.length;
+                    const cur = i === currentDrugIndex && step !== STEPS.COMPLETE;
+                    return (
+                      <div key={i} style={{
+                        background: done ? C.successLight : cur ? C.primaryLight : C.card,
+                        border: `2px solid ${done ? C.successBorder : cur ? C.primary : C.border}`,
+                        borderRadius: 12, padding: "10px 12px", textAlign: "center", position: "relative",
+                      }}>
+                        {done && <div style={{ position: "absolute", top: 5, right: 7, fontSize: 14, color: C.success }}>✓</div>}
+                        {cur && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg,${C.primary},#60a5fa)` }} />}
+                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 3 }}>{rx.drugName}</div>
+                        <div style={{ fontSize: 19, fontWeight: 700, color: cur ? C.primary : C.textSub }}>{rx.totalG.toFixed(3)}g</div>
+                        <div style={{ fontSize: 11, color: C.textMuted }}>{rx.dosage}{rx.unit}×{rx.days}日</div>
+                        {done && <div style={{ fontSize: 11, color: C.success, marginTop: 3, fontWeight: 600 }}>実測: {confirmedDrugs[i].measuredG.toFixed(3)}g</div>}
+                      </div>
+                    );
+                  })}
+                </div>
+              </>
+            )}
+
+            {/* STEP 1: バーコード読取 */}
+            {step === STEPS.SCAN_DRUG && currentDrug && (
+              <div style={{ ...cardStyle, padding: 28, textAlign: "center" }}>
+                <div style={{ fontSize: 44, marginBottom: 8 }}>📷</div>
+                <div style={{ fontSize: 19, fontWeight: 700, marginBottom: 8 }}>バーコードを読み取ってください</div>
+                <div style={{ fontSize: 14, color: C.primary, fontWeight: 600, background: C.primaryLight, borderRadius: 10, padding: "8px 20px", display: "inline-block", marginBottom: 6 }}>
+                  対象: {currentDrug.drugName}
+                </div>
+                <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 16 }}>
+                  YJコード: {currentDrug.yjCode} {drugMaster.length === 0 ? "（デモ: YJコードを直接入力してEnter）" : ""}
+                </div>
+
+                <div style={{ maxWidth: 480, margin: "0 auto" }}>
+                  <input ref={barcodeRef} autoFocus value={barcodeInput}
+                    onChange={(e) => { setBarcodeInput(e.target.value); setErrorMsg(""); }}
+                    placeholder="GS-1バーコードをスキャン"
+                    style={{ width: "100%", padding: "13px 18px", fontSize: 17, background: C.bg, border: `2px solid ${C.border}`, borderRadius: 10, color: C.text, textAlign: "center", outline: "none", boxSizing: "border-box" }}
+                    onFocus={(e) => e.target.style.borderColor = C.primary}
+                    onBlur={(e) => e.target.style.borderColor = C.border}
+                  />
+                  <button onClick={handleBarcodeScan} style={{ marginTop: 10, padding: "10px 34px", fontSize: 14, background: C.primary, border: "none", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 600 }}>照合する</button>
+                </div>
+
+                {lastScanResult && (
+                  <div style={{ marginTop: 16, ...cardStyle, padding: 14, textAlign: "left", fontSize: 12, color: C.textSub }}>
+                    <div style={{ fontWeight: 600, marginBottom: 6, color: C.text }}>GS-1パース結果:</div>
+                    <div>GTIN-14: <span style={{ fontFamily: "monospace", color: C.primary }}>{lastScanResult.gtin14 || "—"}</span></div>
+                    {lastScanResult.expiry && <div>有効期限: {lastScanResult.expiry.formatted}</div>}
+                    {lastScanResult.lot && <div>ロット: {lastScanResult.lot}</div>}
+                    {lastScanResult.errors?.length > 0 && <div style={{ color: C.warning }}>{lastScanResult.errors.join(", ")}</div>}
+                  </div>
+                )}
+
+                {errorMsg && (
+                  <div style={{ marginTop: 16, background: C.dangerLight, border: `2px solid ${C.danger}`, borderRadius: 12, padding: 14, color: C.danger, fontSize: 14, fontWeight: 600, whiteSpace: "pre-line" }}>⛔ {errorMsg}</div>
+                )}
+              </div>
+            )}
+
+            {/* STEP 2: 秤量 */}
+            {step === STEPS.WEIGHING && currentDrug && (
+              <div style={{ ...cardStyle, padding: 28, textAlign: "center", borderColor: isWithinTolerance || drugConfirmed ? C.successBorder : C.border, borderWidth: 2, borderStyle: "solid" }}>
+                <div style={{ fontSize: 14, color: C.textSub, marginBottom: 8 }}>秤量中: <span style={{ color: C.primary, fontWeight: 700 }}>{currentDrug.drugName}</span></div>
+                <div style={{ background: C.bg, borderRadius: 16, padding: "24px 36px", margin: "10px auto", maxWidth: 480, border: `3px solid ${drugConfirmed ? C.successBorder : isWithinTolerance ? C.successBorder : scaleValue > 0 ? "#fbbf24" : C.border}`, transition: "border-color 0.3s" }}>
+                  <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 6, letterSpacing: 2 }}>TAKAZO LB-600S2（模擬）</div>
+                  <div style={{ fontSize: 52, fontWeight: 700, fontFamily: "'Courier New',monospace", color: drugConfirmed || isWithinTolerance ? C.success : C.text }}>
+                    {scaleValue.toFixed(3)}<span style={{ fontSize: 22, color: C.textMuted }}> g</span>
+                  </div>
+                  <div style={{ marginTop: 14, padding: 12, background: C.warningLight, borderRadius: 8, border: "1px dashed #fbbf24" }}>
+                    <div style={{ fontSize: 11, color: C.warning, marginBottom: 6, fontWeight: 600 }}>⚡ プロトタイプ：数値を手入力</div>
+                    <input ref={scaleRef} type="number" step="0.001" value={scaleValue || ""} onChange={handleScaleInput}
+                      placeholder="秤量値(g)" style={{ width: "100%", padding: 9, fontSize: 19, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, textAlign: "center", outline: "none", boxSizing: "border-box" }}
+                    />
+                    <div style={{ fontSize: 11, color: C.textSub, marginTop: 5 }}>許容範囲内で「0」入力 → 確定</div>
+                  </div>
+                </div>
+
+                <div style={{ display: "flex", justifyContent: "center", gap: 28, marginTop: 18 }}>
+                  {[
+                    ["目標値", `${currentDrug.totalG.toFixed(3)}g`, C.primary],
+                    ["差分", scaleValue > 0 ? `${(scaleValue - currentDrug.totalG >= 0 ? "+" : "")}${(scaleValue - currentDrug.totalG).toFixed(3)}g` : "—", isWithinTolerance ? C.success : C.warning],
+                    ["誤差率", scaleValue > 0 ? `${(Math.abs(scaleValue - currentDrug.totalG) / currentDrug.totalG * 100).toFixed(1)}%` : "—", isWithinTolerance ? C.success : C.warning],
+                  ].map(([label, val, col]) => (
+                    <div key={label} style={{ background: C.bg, borderRadius: 10, padding: "10px 18px", minWidth: 100 }}>
+                      <div style={{ color: C.textMuted, fontSize: 11, fontWeight: 600, marginBottom: 3 }}>{label}</div>
+                      <div style={{ fontSize: 20, fontWeight: 700, color: col }}>{val}</div>
+                    </div>
+                  ))}
+                </div>
+
+                <div style={{
+                  marginTop: 18, padding: "12px 22px", borderRadius: 10, fontSize: 14, fontWeight: 700,
+                  background: drugConfirmed || isWithinTolerance ? C.successLight : C.bg,
+                  color: drugConfirmed || isWithinTolerance ? C.success : C.textSub,
+                  border: `1px solid ${drugConfirmed || isWithinTolerance ? C.successBorder : C.border}`,
+                }}>
+                  {drugConfirmed ? "✅ 確定！次の薬剤へ..." : isWithinTolerance ? "🔔 許容範囲内！0を入力して確定" : scaleValue > 0 ? "⏳ 秤量中..." : "⚖️ 薬剤を秤に載せてください"}
+                </div>
+              </div>
+            )}
+
+            {/* STEP 3: 完了 */}
+            {step === STEPS.COMPLETE && (
+              <div style={{ ...cardStyle, padding: 36, textAlign: "center", background: `linear-gradient(135deg,${C.successLight},#fff)`, borderColor: C.successBorder, borderWidth: 2, borderStyle: "solid" }}>
+                <div style={{ fontSize: 56, marginBottom: 14 }}>🎉</div>
+                <div style={{ fontSize: 22, fontWeight: 700, color: C.success, marginBottom: 6 }}>全薬剤の秤量が完了</div>
+                <div style={{ fontSize: 14, color: C.textSub, marginBottom: 22 }}>{selectedPatient.name} の調剤記録</div>
+                <div style={{ ...cardStyle, padding: 18, textAlign: "left", maxWidth: 500, margin: "0 auto 22px" }}>
+                  {confirmedDrugs.map((d, i) => (
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: i < confirmedDrugs.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                      <span style={{ fontSize: 14, fontWeight: 500 }}>{d.drugName}</span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: C.success }}>{d.measuredG.toFixed(3)}g <span style={{ color: C.textMuted, fontWeight: 400, fontSize: 12 }}>(目標{d.totalG.toFixed(3)}g)</span></span>
+                    </div>
+                  ))}
+                </div>
+                <button onClick={saveRecord} style={{ padding: "13px 40px", fontSize: 15, fontWeight: 700, background: `linear-gradient(135deg,${C.success},#059669)`, border: "none", borderRadius: 12, color: "#fff", cursor: "pointer", boxShadow: "0 4px 16px rgba(16,185,129,0.25)" }}>💾 保存して終了</button>
+              </div>
+            )}
+          </div>
+        )}
+
+        {/* ════════════════ 履歴ページ ════════════════ */}
+        {page === PAGES.HISTORY && (
+          <div>
+            <h2 style={{ fontSize: 20, fontWeight: 700, marginBottom: 16 }}>📋 調剤履歴</h2>
+            {history.length === 0 ? (
+              <div style={{ ...cardStyle, padding: 40, textAlign: "center", color: C.textMuted }}>まだ履歴がありません</div>
+            ) : (
+              history.map((r) => (
+                <div key={r.id} style={{ ...cardStyle, padding: 16, marginBottom: 10 }}>
+                  <div style={{ display: "flex", justifyContent: "space-between", marginBottom: 6 }}>
+                    <span style={{ fontWeight: 600 }}>{r.patient.name}（{r.patient.kana}）</span>
+                    <span style={{ color: C.textMuted, fontSize: 12 }}>{new Date(r.completedAt).toLocaleString("ja-JP")}</span>
+                  </div>
+                  <div style={{ fontSize: 13, color: C.textSub }}>
+                    {r.drugs.map((d, i) => <span key={i}>{d.drugName} {d.measuredG.toFixed(3)}g{i < r.drugs.length - 1 ? " / " : ""}</span>)}
+                  </div>
+                </div>
+              ))
+            )}
+          </div>
+        )}
+      </div>
+
+      <style>{`
+        @import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700&display=swap');
+        * { box-sizing: border-box; margin: 0; padding: 0; }
+        input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
+        input[type=number] { -moz-appearance: textfield; }
+      `}</style>
+    </div>
+  );
+}
+
+// ── GS-1テスターコンポーネント ──
+function GS1Tester({ drugMaster }) {
+  const [input, setInput] = useState("");
+  const [result, setResult] = useState(null);
+
+  const test = () => {
+    if (!input.trim()) return;
+    const parsed = parseGS1Barcode(input.trim());
+    const masterHit = drugMaster.find((d) => d.gtin14 === parsed.gtin14);
+    const jan = gtin14ToJan(parsed.gtin14);
+    setResult({ ...parsed, masterHit, jan });
+  };
+
+  return (
+    <div>
+      <div style={{ display: "flex", gap: 8, marginBottom: 10 }}>
+        <input value={input} onChange={(e) => setInput(e.target.value)}
+          placeholder="例: 0104987654321234172603301012345"
+          style={{ flex: 1, padding: "9px 14px", fontSize: 13, border: `1px solid ${C.border}`, borderRadius: 8, outline: "none", fontFamily: "monospace" }}
+          onKeyDown={(e) => e.key === "Enter" && test()}
+        />
+        <button onClick={test} style={{ padding: "9px 20px", fontSize: 13, background: C.primary, color: "#fff", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 600 }}>解析</button>
+      </div>
+      {result && (
+        <div style={{ fontSize: 12, lineHeight: 1.8, color: C.textSub }}>
+          <div>GTIN-14: <b style={{ color: C.primary }}>{result.gtin14 || "—"}</b></div>
+          <div>JAN(算出): <b>{result.jan || "—"}</b></div>
+          {result.expiry && <div>有効期限: <b>{result.expiry.formatted}</b></div>}
+          {result.lot && <div>ロット: <b>{result.lot}</b></div>}
+          {result.serial && <div>シリアル: <b>{result.serial}</b></div>}
+          <div>マスター照合: {result.masterHit ? <b style={{ color: C.success }}>✅ {result.masterHit.name}</b> : <span style={{ color: C.textMuted }}>該当なし</span>}</div>
+          {result.errors?.length > 0 && <div style={{ color: C.warning }}>注意: {result.errors.join(", ")}</div>}
+        </div>
+      )}
+    </div>
+  );
+}
+
+ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
+</script>
+</body>
+</html>
