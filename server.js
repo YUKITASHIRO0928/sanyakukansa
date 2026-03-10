@@ -24,7 +24,7 @@ const https = require("https");
 // ★★★ 設定 ★★★
 const WATCH_DIR = "C:\\SIPS1";          // NSIPS共有フォルダ
 const PORT = 3456;                       // サーバーポート
-const POLL_INTERVAL = 2000;              // フォルダ監視間隔(ms)
+const POLL_INTERVAL = 500;               // フォルダ監視間隔(ms) - 一瞬で消えるファイル対策
 const DATA_DIR = path.join(__dirname, "data"); // 履歴等の保存先
 const HISTORY_FILE = path.join(DATA_DIR, "dispensing_history.json");
 const GTINMAP_FILE = path.join(DATA_DIR, "gtin_map.json");
@@ -142,23 +142,77 @@ function broadcastWs(message) {
 }
 
 // ═══════════════════════════════════════════
-// フォルダ監視
+// フォルダ監視（リアルタイム + ポーリング併用）
 // ═══════════════════════════════════════════
 let knownFiles = {};
+const CACHE_DIR = path.join(DATA_DIR, "nsips_cache"); // 一瞬で消えるファイルのコピー保存先
+if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 function scanFiles() {
   try {
-    if (!fs.existsSync(WATCH_DIR)) return {};
-    const files = fs.readdirSync(WATCH_DIR).filter(f => /\.(csv|tsv|txt)$/i.test(f));
+    // WATCH_DIR（ネットワーク）とローカルキャッシュの両方をスキャン
     const result = {};
-    for (const f of files) {
-      try {
-        const stat = fs.statSync(path.join(WATCH_DIR, f));
-        result[f] = { name: f, size: stat.size, mtime: stat.mtimeMs };
-      } catch (e) {}
+    // ネットワークフォルダ
+    if (fs.existsSync(WATCH_DIR)) {
+      const files = fs.readdirSync(WATCH_DIR).filter(f => /\.(csv|tsv|txt)$/i.test(f));
+      for (const f of files) {
+        try {
+          const stat = fs.statSync(path.join(WATCH_DIR, f));
+          result[f] = { name: f, size: stat.size, mtime: stat.mtimeMs, source: "network" };
+        } catch (e) {}
+      }
+    }
+    // ローカルキャッシュ
+    if (fs.existsSync(CACHE_DIR)) {
+      const cached = fs.readdirSync(CACHE_DIR).filter(f => /\.(csv|tsv|txt)$/i.test(f));
+      for (const f of cached) {
+        if (!result[f]) {
+          try {
+            const stat = fs.statSync(path.join(CACHE_DIR, f));
+            result[f] = { name: f, size: stat.size, mtime: stat.mtimeMs, source: "cache" };
+          } catch (e) {}
+        }
+      }
     }
     return result;
   } catch (e) { return {}; }
+}
+
+// ファイルを即座にキャッシュにコピー
+function captureFile(filename) {
+  try {
+    const src = path.join(WATCH_DIR, filename);
+    const dst = path.join(CACHE_DIR, filename);
+    if (fs.existsSync(src) && !fs.existsSync(dst)) {
+      fs.copyFileSync(src, dst);
+      console.log(`  💾 キャプチャ: ${filename}`);
+    }
+  } catch (e) {
+    // ファイルが既に消えている場合もある
+  }
+}
+
+// fs.watch でリアルタイム監視
+function startRealtimeWatch() {
+  try {
+    if (!fs.existsSync(WATCH_DIR)) return;
+    fs.watch(WATCH_DIR, (eventType, filename) => {
+      if (!filename) return;
+      if (!/\.(csv|tsv|txt)$/i.test(filename)) return;
+      // ファイルが出現した瞬間にキャプチャ
+      if (eventType === "rename" || eventType === "change") {
+        setTimeout(() => captureFile(filename), 50);  // 50ms待ってからコピー（書込み完了を待つ）
+        setTimeout(() => captureFile(filename), 200); // 200msでもリトライ
+        setTimeout(() => {
+          captureFile(filename);
+          checkForChanges(); // UIに通知
+        }, 500);
+      }
+    });
+    console.log("👁 リアルタイム監視: ON（fs.watch）");
+  } catch (e) {
+    console.log(`⚠ リアルタイム監視失敗: ${e.message}（ポーリングで代替）`);
+  }
 }
 
 function checkForChanges() {
@@ -229,7 +283,9 @@ const server = http.createServer(async (req, res) => {
     if (!fileName || /[.]{2}|[/\\]/.test(fileName)) {
       res.writeHead(400); res.end('{"error":"不正なファイル名"}'); return;
     }
-    const fp = path.join(WATCH_DIR, fileName);
+    // ネットワークフォルダ → キャッシュの順で探す
+    let fp = path.join(WATCH_DIR, fileName);
+    if (!fs.existsSync(fp)) fp = path.join(CACHE_DIR, fileName);
     if (!fs.existsSync(fp)) { res.writeHead(404); res.end('{"error":"ファイル未検出"}'); return; }
     res.writeHead(200, { "Content-Type": "text/csv; charset=shift_jis" });
     res.end(fs.readFileSync(fp));
@@ -378,5 +434,6 @@ server.listen(PORT, async () => {
   if (!dirOk) console.log(`⚠ "${WATCH_DIR}" が見つかりません。WATCH_DIRを確認してください。\n`);
   knownFiles = scanFiles();
   console.log(`初回スキャン: ${Object.keys(knownFiles).length}件のCSVを検出\n`);
+  startRealtimeWatch();
   setInterval(checkForChanges, POLL_INTERVAL);
 });
