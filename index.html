@@ -666,9 +666,9 @@ function parseGenericNSIPSCSV(csvText) {
   const lines = csvText.split(/\r?\n/).filter((l) => l.trim());
   if (lines.length < 2) return { patients: [], errors: ["データが空です"] };
 
-  // ELIXIR形式検出（VER010601で始まる）
+  // ELIXIR形式検出（VER01で始まる）
   const firstLine = lines[0].trim();
-  if (firstLine.startsWith("VER0106") || firstLine.startsWith("VER010601")) {
+  if (firstLine.startsWith("VER01")) {
     return parseELIXIRFormat(csvText);
   }
 
