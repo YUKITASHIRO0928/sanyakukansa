@@ -22,7 +22,7 @@ const crypto = require("crypto");
 const https = require("https");
 
 // ★★★ 設定 ★★★
-const WATCH_DIR = "C:\\SIPS1";          // NSIPS共有フォルダ
+const WATCH_DIR = "\\\\ELIXIR1\\Senddata\\SIPS1\\DATA";          // NSIPS共有フォルダ
 const PORT = 3456;                       // サーバーポート
 const POLL_INTERVAL = 500;               // フォルダ監視間隔(ms) - 一瞬で消えるファイル対策
 const DATA_DIR = path.join(__dirname, "data"); // 履歴等の保存先
