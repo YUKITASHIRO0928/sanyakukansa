@@ -22,9 +22,10 @@ const crypto = require("crypto");
 const https = require("https");
 
 // ★★★ 設定 ★★★
-const WATCH_DIR = "\\\\ELIXIR1\\Senddata\\SIPS1\\DATA";          // NSIPS共有フォルダ
+const WATCH_DIR = "\\\\ELIXIR1\\Senddata\\SIPS3\\DATA";          // NSIPS共有フォルダ（SIPS3 = ファイルが残る）
+const WATCH_DIR2 = "\\\\ELIXIR1\\Senddata\\SIPS1\\JAHISCZK";    // JAHISCZK（バックアップ）
 const PORT = 3456;                       // サーバーポート
-const POLL_INTERVAL = 500;               // フォルダ監視間隔(ms) - 一瞬で消えるファイル対策
+const POLL_INTERVAL = 300;               // フォルダ監視間隔(ms) - 高速ポーリング
 const DATA_DIR = path.join(__dirname, "data"); // 履歴等の保存先
 const HISTORY_FILE = path.join(DATA_DIR, "dispensing_history.json");
 const GTINMAP_FILE = path.join(DATA_DIR, "gtin_map.json");
@@ -150,16 +151,27 @@ if (!fs.existsSync(CACHE_DIR)) fs.mkdirSync(CACHE_DIR, { recursive: true });
 
 function scanFiles() {
   try {
-    // WATCH_DIR（ネットワーク）とローカルキャッシュの両方をスキャン
     const result = {};
-    // ネットワークフォルダ
+    // ネットワークフォルダ1（DATA - 一瞬で消える）
     if (fs.existsSync(WATCH_DIR)) {
       const files = fs.readdirSync(WATCH_DIR).filter(f => /\.(csv|tsv|txt)$/i.test(f));
       for (const f of files) {
         try {
           const stat = fs.statSync(path.join(WATCH_DIR, f));
-          result[f] = { name: f, size: stat.size, mtime: stat.mtimeMs, source: "network" };
+          result[f] = { name: f, size: stat.size, mtime: stat.mtimeMs, source: "network", dir: WATCH_DIR };
         } catch (e) {}
+      }
+    }
+    // ネットワークフォルダ2（JAHISCZK - ファイルが残る）
+    if (WATCH_DIR2 && fs.existsSync(WATCH_DIR2)) {
+      const files2 = fs.readdirSync(WATCH_DIR2).filter(f => /\.(csv|tsv|txt)$/i.test(f));
+      for (const f of files2) {
+        if (!result[f]) {
+          try {
+            const stat = fs.statSync(path.join(WATCH_DIR2, f));
+            result[f] = { name: f, size: stat.size, mtime: stat.mtimeMs, source: "network2", dir: WATCH_DIR2 };
+          } catch (e) {}
+        }
       }
     }
     // ローカルキャッシュ
@@ -169,7 +181,7 @@ function scanFiles() {
         if (!result[f]) {
           try {
             const stat = fs.statSync(path.join(CACHE_DIR, f));
-            result[f] = { name: f, size: stat.size, mtime: stat.mtimeMs, source: "cache" };
+            result[f] = { name: f, size: stat.size, mtime: stat.mtimeMs, source: "cache", dir: CACHE_DIR };
           } catch (e) {}
         }
       }
@@ -179,40 +191,48 @@ function scanFiles() {
 }
 
 // ファイルを即座にキャッシュにコピー（常に上書き）
-function captureFile(filename) {
+function captureFile(filename, srcDir) {
   try {
-    const src = path.join(WATCH_DIR, filename);
-    if (fs.existsSync(src)) {
-      const dst = path.join(CACHE_DIR, filename);
-      fs.copyFileSync(src, dst);
-      console.log(`  💾 キャプチャ: ${filename}`);
+    // 指定ディレクトリ、WATCH_DIR、WATCH_DIR2の順で探す
+    const dirs = [srcDir, WATCH_DIR, WATCH_DIR2].filter(Boolean);
+    for (const dir of dirs) {
+      const src = path.join(dir, filename);
+      if (fs.existsSync(src)) {
+        const dst = path.join(CACHE_DIR, filename);
+        fs.copyFileSync(src, dst);
+        console.log(`  💾 キャプチャ: ${filename} (from ${dir === WATCH_DIR ? "DATA" : dir === WATCH_DIR2 ? "JAHISCZK" : "other"})`);
+        return true;
+      }
     }
-  } catch (e) {
-    // ファイルが既に消えている場合もある
-  }
+  } catch (e) {}
+  return false;
 }
 
 // fs.watch でリアルタイム監視
 function startRealtimeWatch() {
-  try {
-    if (!fs.existsSync(WATCH_DIR)) return;
-    fs.watch(WATCH_DIR, (eventType, filename) => {
-      if (!filename) return;
-      if (!/\.(csv|tsv|txt)$/i.test(filename)) return;
-      // ファイルが出現した瞬間にキャプチャ
-      if (eventType === "rename" || eventType === "change") {
-        setTimeout(() => captureFile(filename), 50);  // 50ms待ってからコピー（書込み完了を待つ）
-        setTimeout(() => captureFile(filename), 200); // 200msでもリトライ
-        setTimeout(() => {
-          captureFile(filename);
-          checkForChanges(); // UIに通知
-        }, 500);
-      }
-    });
-    console.log("👁 リアルタイム監視: ON（fs.watch）");
-  } catch (e) {
-    console.log(`⚠ リアルタイム監視失敗: ${e.message}（ポーリングで代替）`);
-  }
+  const watchDir = (dir, label) => {
+    try {
+      if (!dir || !fs.existsSync(dir)) return;
+      fs.watch(dir, (eventType, filename) => {
+        if (!filename) return;
+        if (!/\.(csv|tsv|txt)$/i.test(filename)) return;
+        if (eventType === "rename" || eventType === "change") {
+          setTimeout(() => captureFile(filename, dir), 10);
+          setTimeout(() => captureFile(filename, dir), 50);
+          setTimeout(() => captureFile(filename, dir), 150);
+          setTimeout(() => {
+            captureFile(filename, dir);
+            checkForChanges();
+          }, 300);
+        }
+      });
+      console.log(`👁 リアルタイム監視: ON (${label})`);
+    } catch (e) {
+      console.log(`⚠ リアルタイム監視失敗(${label}): ${e.message}`);
+    }
+  };
+  watchDir(WATCH_DIR, "DATA");
+  watchDir(WATCH_DIR2, "JAHISCZK");
 }
 
 function checkForChanges() {
@@ -225,7 +245,8 @@ function checkForChanges() {
   }
   // 新規・変更ファイルをキャプチャ
   for (const name of [...newFiles, ...changedFiles]) {
-    captureFile(name);
+    const info = current[name];
+    captureFile(name, info ? info.dir : undefined);
   }
   if (newFiles.length > 0 || changedFiles.length > 0) {
     // キャプチャ後に再スキャン（キャッシュ含む）
@@ -290,8 +311,9 @@ const server = http.createServer(async (req, res) => {
     if (!fileName || /[.]{2}|[/\\]/.test(fileName)) {
       res.writeHead(400); res.end('{"error":"不正なファイル名"}'); return;
     }
-    // ネットワークフォルダ → キャッシュの順で探す
+    // ネットワークフォルダ → WATCH_DIR2 → キャッシュの順で探す
     let fp = path.join(WATCH_DIR, fileName);
+    if (!fs.existsSync(fp) && WATCH_DIR2) fp = path.join(WATCH_DIR2, fileName);
     if (!fs.existsSync(fp)) fp = path.join(CACHE_DIR, fileName);
     if (!fs.existsSync(fp)) { res.writeHead(404); res.end('{"error":"ファイル未検出"}'); return; }
     res.writeHead(200, { "Content-Type": "text/csv; charset=shift_jis" });
@@ -425,12 +447,14 @@ server.listen(PORT, async () => {
   await autoUpdateFromGitHub();
 
   const dirOk = fs.existsSync(WATCH_DIR);
+  const dir2Ok = WATCH_DIR2 && fs.existsSync(WATCH_DIR2);
   console.log("");
   console.log("╔══════════════════════════════════════════════════╗");
-  console.log("║   散薬調剤支援システム — サーバー v0.7              ║");
+  console.log("║   散薬調剤支援システム — サーバー v0.8              ║");
   console.log("╠══════════════════════════════════════════════════╣");
   console.log(`║  アプリURL:    http://localhost:${PORT}`);
-  console.log(`║  監視フォルダ: ${WATCH_DIR} ${dirOk ? "✅" : "❌ 未検出"}`);
+  console.log(`║  監視1(DATA):  ${WATCH_DIR} ${dirOk ? "✅" : "❌ 未検出"}`);
+  console.log(`║  監視2(CZK):   ${WATCH_DIR2 || "未設定"} ${dir2Ok ? "✅" : WATCH_DIR2 ? "❌ 未検出" : ""}`);
   console.log(`║  履歴ファイル: ${HISTORY_FILE}`);
   console.log(`║  保存済履歴:   ${historyRecords.length}件`);
   console.log(`║  自動更新:     ${AUTO_UPDATE && GITHUB_INDEX_URL ? "✅ ON" : "⏸ OFF（GITHUB_INDEX_URL未設定）"}`);
