@@ -556,6 +556,8 @@ const MOCK_PATIENTS = [
 // 一般的な電子天秤のシリアル通信設定を自動試行
 
 const SCALE_BAUD_RATES = [2400, 4800, 9600, 19200]; // 試行するボーレート
+// 一般的な電子天秤のデータ要求コマンド（各メーカー対応）
+const SCALE_REQUEST_CMDS = ["Q\r\n", "S\r\n", "SI\r\n", "P\r\n", "?W\r\n", "D\r\n", "\x1BQ\r\n"];
 
 async function connectScale(onData, onStatus) {
   if (!navigator.serial) {
@@ -566,25 +568,33 @@ async function connectScale(onData, onStatus) {
     onStatus("connecting", "天秤を選択してください...");
     const port = await navigator.serial.requestPort();
     
-    // ボーレートを順番に試行
-    for (const baud of SCALE_BAUD_RATES) {
+    // 最初に9600で接続（最も一般的）
+    const baudOrder = [9600, 2400, 4800, 19200];
+    let connected = false;
+    
+    for (const baud of baudOrder) {
       try {
         await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" });
-        onStatus("connected", `接続成功 (${baud}bps)`);
+        connected = true;
+        onStatus("connected", `接続成功 (${baud}bps) - データ取得中...`);
         
-        // 読み取りループ開始
         const reader = port.readable.getReader();
+        const writer = port.writable.getWriter();
         const decoder = new TextDecoder();
+        const encoder = new TextEncoder();
         let buffer = "";
+        let dataReceived = false;
+        let pollTimer = null;
+        let cmdIndex = 0;
         
-        (async () => {
+        // 読み取りループ
+        const readLoop = async () => {
           try {
             while (true) {
               const { value, done } = await reader.read();
               if (done) break;
               buffer += decoder.decode(value, { stream: true });
               
-              // 改行区切りでデータを処理
               const lines = buffer.split(/[\r\n]+/);
               buffer = lines.pop() || "";
               
@@ -593,12 +603,14 @@ async function connectScale(onData, onStatus) {
                 if (!trimmed) continue;
                 
                 // 数値を抽出（様々な天秤の出力フォーマットに対応）
-                // 例: "ST,+   0.000 g", "  0.000g", "+0.000", "N +  12.345 g"
+                // 例: "ST,+   0.000 g", "  0.000g", "+0.000", "N +  12.345 g", "  46.5 g"
                 const match = trimmed.match(/[+-]?\s*\d+\.?\d*/);
                 if (match) {
                   const val = parseFloat(match[0].replace(/\s/g, ""));
                   if (!isNaN(val)) {
+                    dataReceived = true;
                     onData(val, trimmed);
+                    onStatus("connected", `接続中 (${baud}bps) ✅ データ受信中`);
                   }
                 }
               }
@@ -608,15 +620,57 @@ async function connectScale(onData, onStatus) {
               onStatus("error", `読取エラー: ${e.message}`);
             }
           }
-        })();
+        };
+        readLoop();
         
-        return { port, reader, baudRate: baud };
+        // ポーリング: 定期的にデータ要求コマンドを送信
+        const sendCmd = async (cmd) => {
+          try { await writer.write(encoder.encode(cmd)); } catch(e) {}
+        };
+        
+        // 最初に全コマンドを試す（どれが反応するか探す）
+        let workingCmd = null;
+        const tryCommands = async () => {
+          for (const cmd of SCALE_REQUEST_CMDS) {
+            await sendCmd(cmd);
+            await new Promise(r => setTimeout(r, 300));
+            if (dataReceived) {
+              workingCmd = cmd;
+              onStatus("connected", `接続中 (${baud}bps) ✅ データ受信中`);
+              break;
+            }
+          }
+        };
+        await tryCommands();
+        
+        // 定期ポーリング開始（100ms間隔 = 秒10回更新）
+        pollTimer = setInterval(async () => {
+          if (workingCmd) {
+            await sendCmd(workingCmd);
+          } else {
+            // まだ動作するコマンドが見つかっていない場合、順番に試す
+            await sendCmd(SCALE_REQUEST_CMDS[cmdIndex % SCALE_REQUEST_CMDS.length]);
+            cmdIndex++;
+            if (dataReceived) {
+              workingCmd = SCALE_REQUEST_CMDS[(cmdIndex - 1) % SCALE_REQUEST_CMDS.length];
+            }
+          }
+        }, 100);
+        
+        if (!dataReceived) {
+          onStatus("connected", `接続中 (${baud}bps) - コマンド探索中... 天秤に物を載せたり降ろしたりしてみてください`);
+          // 連続送信モードの場合もあるので、そのまま待機（readLoopが受信する）
+        }
+        
+        return { port, reader, writer, baudRate: baud, pollTimer };
       } catch (e) {
         try { await port.close(); } catch (ce) {}
-        continue; // 次のボーレートを試す
+        continue;
       }
     }
-    onStatus("error", "接続失敗: 全てのボーレートで接続できませんでした");
+    if (!connected) {
+      onStatus("error", "接続失敗: 全てのボーレートで接続できませんでした");
+    }
     return null;
   } catch (e) {
     if (e.name === "NotFoundError") {
@@ -631,6 +685,8 @@ async function connectScale(onData, onStatus) {
 async function disconnectScale(conn) {
   if (!conn) return;
   try {
+    if (conn.pollTimer) clearInterval(conn.pollTimer);
+    if (conn.writer) conn.writer.releaseLock();
     if (conn.reader) { await conn.reader.cancel(); conn.reader.releaseLock(); }
     if (conn.port) { await conn.port.close(); }
   } catch (e) {}
@@ -1942,7 +1998,6 @@ function GS1Tester({ drugMaster }) {
     </div>
   );
 }
-
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
 </script>
 </body>
