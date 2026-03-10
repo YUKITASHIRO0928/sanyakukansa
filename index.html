@@ -568,13 +568,13 @@ async function connectScale(onData, onStatus) {
     onStatus("connecting", "天秤を選択してください...");
     const port = await navigator.serial.requestPort();
     
-    // 最初に9600で接続（最も一般的）
-    const baudOrder = [9600, 2400, 4800, 19200];
+    // LB-600S2は4800bps設定
+    const baudOrder = [4800, 9600, 2400, 19200];
     let connected = false;
     
     for (const baud of baudOrder) {
       try {
-        await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" });
+        await port.open({ baudRate: baud, dataBits: 8, stopBits: 2, parity: "none", flowControl: "none" });
         connected = true;
         onStatus("connected", `接続成功 (${baud}bps) - データ取得中...`);
         
