@@ -550,6 +550,93 @@ const MOCK_PATIENTS = [
 ];
 
 // ═══════════════════════════════════════════
+// 電子天秤 Web Serial API 接続
+// ═══════════════════════════════════════════
+// CP2104 USB-UART Bridge 経由で接続
+// 一般的な電子天秤のシリアル通信設定を自動試行
+
+const SCALE_BAUD_RATES = [2400, 4800, 9600, 19200]; // 試行するボーレート
+
+async function connectScale(onData, onStatus) {
+  if (!navigator.serial) {
+    onStatus("error", "このブラウザはWeb Serial APIに対応していません。Chromeを使ってください。");
+    return null;
+  }
+  try {
+    onStatus("connecting", "天秤を選択してください...");
+    const port = await navigator.serial.requestPort();
+    
+    // ボーレートを順番に試行
+    for (const baud of SCALE_BAUD_RATES) {
+      try {
+        await port.open({ baudRate: baud, dataBits: 8, stopBits: 1, parity: "none", flowControl: "none" });
+        onStatus("connected", `接続成功 (${baud}bps)`);
+        
+        // 読み取りループ開始
+        const reader = port.readable.getReader();
+        const decoder = new TextDecoder();
+        let buffer = "";
+        
+        (async () => {
+          try {
+            while (true) {
+              const { value, done } = await reader.read();
+              if (done) break;
+              buffer += decoder.decode(value, { stream: true });
+              
+              // 改行区切りでデータを処理
+              const lines = buffer.split(/[\r\n]+/);
+              buffer = lines.pop() || "";
+              
+              for (const line of lines) {
+                const trimmed = line.trim();
+                if (!trimmed) continue;
+                
+                // 数値を抽出（様々な天秤の出力フォーマットに対応）
+                // 例: "ST,+   0.000 g", "  0.000g", "+0.000", "N +  12.345 g"
+                const match = trimmed.match(/[+-]?\s*\d+\.?\d*/);
+                if (match) {
+                  const val = parseFloat(match[0].replace(/\s/g, ""));
+                  if (!isNaN(val)) {
+                    onData(val, trimmed);
+                  }
+                }
+              }
+            }
+          } catch (e) {
+            if (e.name !== "NetworkError") {
+              onStatus("error", `読取エラー: ${e.message}`);
+            }
+          }
+        })();
+        
+        return { port, reader, baudRate: baud };
+      } catch (e) {
+        try { await port.close(); } catch (ce) {}
+        continue; // 次のボーレートを試す
+      }
+    }
+    onStatus("error", "接続失敗: 全てのボーレートで接続できませんでした");
+    return null;
+  } catch (e) {
+    if (e.name === "NotFoundError") {
+      onStatus("idle", "キャンセルされました");
+    } else {
+      onStatus("error", `エラー: ${e.message}`);
+    }
+    return null;
+  }
+}
+
+async function disconnectScale(conn) {
+  if (!conn) return;
+  try {
+    if (conn.reader) { await conn.reader.cancel(); conn.reader.releaseLock(); }
+    if (conn.port) { await conn.port.close(); }
+  } catch (e) {}
+}
+
+// ═══════════════════════════════════════════
 // メインApp
 // ═══════════════════════════════════════════
 const PAGES = { MASTER: "master", DISPENSING: "dispensing", HISTORY: "history" };
@@ -672,6 +759,12 @@ function App() {
   const [addDrugDosage, setAddDrugDosage] = useState(""); // 1日量
   const [addDrugUnit, setAddDrugUnit] = useState("g"); // 単位
   const [addDrugRpNo, setAddDrugRpNo] = useState(0); // 追加先Rp番号
+
+  // 天秤接続
+  const [scaleConn, setScaleConn] = useState(null);
+  const [scaleStatus, setScaleStatus] = useState("idle"); // idle, connecting, connected, error
+  const [scaleStatusMsg, setScaleStatusMsg] = useState("");
+  const [scaleRawData, setScaleRawData] = useState("");
 
   const barcodeRef = useRef(null);
   const scaleRef = useRef(null);
@@ -894,6 +987,33 @@ function App() {
     const val = parseFloat(e.target.value) || 0;
     setPrevScaleValue(scaleValue);
     setScaleValue(val);
+  };
+
+  // 天秤接続
+  const handleConnectScale = async () => {
+    if (scaleConn) {
+      await disconnectScale(scaleConn);
+      setScaleConn(null);
+      setScaleStatus("idle");
+      setScaleStatusMsg("");
+      return;
+    }
+    const conn = await connectScale(
+      (val, raw) => {
+        // 天秤からデータ受信 → 秤量値を更新
+        setPrevScaleValue((prev) => prev);
+        setScaleValue((prev) => {
+          setPrevScaleValue(prev);
+          return val;
+        });
+        setScaleRawData(raw);
+      },
+      (status, msg) => {
+        setScaleStatus(status);
+        setScaleStatusMsg(msg);
+      }
+    );
+    if (conn) setScaleConn(conn);
   };
 
   const selectPatient = (p) => {
@@ -1622,17 +1742,50 @@ function App() {
               <div style={{ ...cardStyle, padding: 28, textAlign: "center", borderColor: isWithinTolerance || drugConfirmed ? C.successBorder : C.border, borderWidth: 2, borderStyle: "solid" }}>
                 <div style={{ fontSize: 14, color: C.textSub, marginBottom: 8 }}>秤量中: <span style={{ color: C.primary, fontWeight: 700 }}>{currentDrug.drugName}</span></div>
                 <div style={{ background: C.bg, borderRadius: 16, padding: "24px 36px", margin: "10px auto", maxWidth: 480, border: `3px solid ${drugConfirmed ? C.successBorder : isWithinTolerance ? C.successBorder : scaleValue > 0 ? "#fbbf24" : C.border}`, transition: "border-color 0.3s" }}>
-                  <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 6, letterSpacing: 2 }}>TAKAZO LB-600S2（模擬）</div>
+
+                  {/* 天秤接続ボタン */}
+                  <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                    <div style={{ fontSize: 11, color: C.textMuted, letterSpacing: 2 }}>
+                      TAKAZO LB-600S2
+                      {scaleStatus === "connected" && <span style={{ color: C.success, marginLeft: 6 }}>● 接続中</span>}
+                    </div>
+                    <button onClick={handleConnectScale} style={{
+                      padding: "4px 12px", fontSize: 11, borderRadius: 6, cursor: "pointer", fontWeight: 600,
+                      background: scaleStatus === "connected" ? C.dangerLight : C.primaryLight,
+                      color: scaleStatus === "connected" ? C.danger : C.primary,
+                      border: `1px solid ${scaleStatus === "connected" ? "#fca5a5" : "rgba(59,130,246,0.2)"}`,
+                    }}>
+                      {scaleStatus === "connected" ? "切断" : scaleStatus === "connecting" ? "接続中..." : "⚡ 天秤接続"}
+                    </button>
+                  </div>
+
+                  {/* 秤量値表示 */}
                   <div style={{ fontSize: 52, fontWeight: 700, fontFamily: "'Courier New',monospace", color: drugConfirmed || isWithinTolerance ? C.success : C.text }}>
                     {scaleValue.toFixed(3)}<span style={{ fontSize: 22, color: C.textMuted }}> g</span>
                   </div>
-                  <div style={{ marginTop: 14, padding: 12, background: C.warningLight, borderRadius: 8, border: "1px dashed #fbbf24" }}>
-                    <div style={{ fontSize: 11, color: C.warning, marginBottom: 6, fontWeight: 600 }}>⚡ プロトタイプ：数値を手入力</div>
-                    <input ref={scaleRef} type="number" step="0.001" value={scaleValue || ""} onChange={handleScaleInput}
-                      placeholder="秤量値(g)" style={{ width: "100%", padding: 9, fontSize: 19, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, textAlign: "center", outline: "none", boxSizing: "border-box" }}
-                    />
-                    <div style={{ fontSize: 11, color: C.textSub, marginTop: 5 }}>許容範囲内で「0」入力 → 確定</div>
-                  </div>
+
+                  {/* 天秤接続時: raw data表示 */}
+                  {scaleStatus === "connected" && scaleRawData && (
+                    <div style={{ fontSize: 10, color: C.textMuted, fontFamily: "monospace", marginTop: 4 }}>
+                      RAW: {scaleRawData}
+                    </div>
+                  )}
+
+                  {/* 天秤未接続時: 手入力 */}
+                  {scaleStatus !== "connected" && (
+                    <div style={{ marginTop: 14, padding: 12, background: C.warningLight, borderRadius: 8, border: "1px dashed #fbbf24" }}>
+                      <div style={{ fontSize: 11, color: C.warning, marginBottom: 6, fontWeight: 600 }}>⚡ 手入力モード（天秤未接続）</div>
+                      <input ref={scaleRef} type="number" step="0.001" value={scaleValue || ""} onChange={handleScaleInput}
+                        placeholder="秤量値(g)" style={{ width: "100%", padding: 9, fontSize: 19, background: "#fff", border: `1px solid ${C.border}`, borderRadius: 7, color: C.text, textAlign: "center", outline: "none", boxSizing: "border-box" }}
+                      />
+                      <div style={{ fontSize: 11, color: C.textSub, marginTop: 5 }}>許容範囲内で「0」入力 → 確定</div>
+                    </div>
+                  )}
+
+                  {/* 接続エラー表示 */}
+                  {scaleStatus === "error" && (
+                    <div style={{ marginTop: 8, fontSize: 12, color: C.danger }}>{scaleStatusMsg}</div>
+                  )}
                 </div>
 
                 <div style={{ display: "flex", justifyContent: "center", gap: 28, marginTop: 18 }}>
