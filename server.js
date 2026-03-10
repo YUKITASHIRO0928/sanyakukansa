@@ -178,12 +178,12 @@ function scanFiles() {
   } catch (e) { return {}; }
 }
 
-// ファイルを即座にキャッシュにコピー
+// ファイルを即座にキャッシュにコピー（常に上書き）
 function captureFile(filename) {
   try {
     const src = path.join(WATCH_DIR, filename);
-    const dst = path.join(CACHE_DIR, filename);
-    if (fs.existsSync(src) && !fs.existsSync(dst)) {
+    if (fs.existsSync(src)) {
+      const dst = path.join(CACHE_DIR, filename);
       fs.copyFileSync(src, dst);
       console.log(`  💾 キャプチャ: ${filename}`);
     }
