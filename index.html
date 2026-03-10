@@ -12,13 +12,7 @@
 * { box-sizing: border-box; margin: 0; padding: 0; }
 input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
 input[type=number] { -moz-appearance: textfield; }
-@keyframes shake {
-  0%, 100% { transform: translateX(0); }
-  20% { transform: translateX(-8px); }
-  40% { transform: translateX(8px); }
-  60% { transform: translateX(-4px); }
-  80% { transform: translateX(4px); }
-}
+@keyframes shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-8px); } 40% { transform: translateX(8px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(4px); } }
 </style>
 </head>
 <body>
@@ -337,7 +331,7 @@ function parseNSIPSPrescriptionCSV(csvText) {
         break;
 
       case 201: // RP: 201,RP番号,剤形区分,…
-        currentRP = { rpNo: parseInt(cols[1]) || 0, drugs: [], usage: "" };
+        currentRP = { rpNo: parseInt(cols[1]) || 0, drugs: [], usage: "", days: 0 };
         break;
 
       case 211: // 薬品: 211,薬品コード種別,薬品コード,薬品名称,用量,…
@@ -361,6 +355,10 @@ function parseNSIPSPrescriptionCSV(csvText) {
             days: 0,
             totalMg: 0,
             totalG: 0,
+            rpNo: currentRP ? currentRP.rpNo : 0,
+            rpUsage: "",
+            rpDays: 0,
+            isAdded: false, // 手動追加フラグ
           };
 
           if (currentRP) currentRP.drugs.push(currentDrug);
@@ -378,11 +376,11 @@ function parseNSIPSPrescriptionCSV(csvText) {
           const days = parseInt(cols[4]) || 0;
           if (currentRP) {
             currentRP.usage = (cols[3] || "").trim();
-            // 日数をRP内の全薬品に適用
+            currentRP.days = days;
             currentRP.drugs.forEach((d) => {
               d.days = days;
-              // totalG計算: 散薬の場合 dosage(1日量g) × days
-              // ※用量の単位がgの場合はそのまま計算、mgの場合は変換
+              d.rpUsage = currentRP.usage;
+              d.rpDays = days;
               if (d.unit === "g" || d.unit === "G") {
                 d.totalG = d.dosage * days;
                 d.totalMg = d.totalG * 1000;
@@ -390,14 +388,12 @@ function parseNSIPSPrescriptionCSV(csvText) {
                 d.totalMg = d.dosage * days;
                 d.totalG = d.totalMg / 1000;
               } else {
-                // デフォルト: dosageをgとして扱う
                 d.totalG = d.dosage * days;
                 d.totalMg = d.totalG * 1000;
               }
             });
           }
 
-          // RPを確定 → 処方リストに追加
           if (currentRP && currentPatient) {
             currentRP.drugs.forEach((d) => {
               currentPatient.prescriptions.push(d);
@@ -538,17 +534,17 @@ const MOCK_PATIENTS = [
     id: "P001", name: "田中 太郎", kana: "タナカ タロウ", age: 72, gender: "男",
     prescriptionDate: "2026-03-09", doctor: "山田 一郎",
     prescriptions: [
-      { yjCode: "2171022F1025", drugName: "アムロジピンOD錠5mg", dosage: 5.0, unit: "mg", days: 14, totalMg: 70.0, totalG: 0.070 },
-      { yjCode: "2149036F2025", drugName: "カルベジロール錠10mg", dosage: 10.0, unit: "mg", days: 14, totalMg: 140.0, totalG: 0.140 },
-      { yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 300.0, unit: "mg", days: 14, totalMg: 4200.0, totalG: 4.200 },
+      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 14, yjCode: "2171022F1025", drugName: "アムロジピンOD錠5mg", dosage: 5.0, unit: "mg", days: 14, totalMg: 70.0, totalG: 0.070 },
+      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 14, yjCode: "2149036F2025", drugName: "カルベジロール錠10mg", dosage: 10.0, unit: "mg", days: 14, totalMg: 140.0, totalG: 0.140 },
+      { rpNo: 2, rpUsage: "1日1回就寝前", rpDays: 28, yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 300.0, unit: "mg", days: 28, totalMg: 8400.0, totalG: 8.400 },
     ],
   },
   {
     id: "P002", name: "佐藤 花子", kana: "サトウ ハナコ", age: 65, gender: "女",
     prescriptionDate: "2026-03-09", doctor: "山田 一郎",
     prescriptions: [
-      { yjCode: "3332001F1074", drugName: "ワルファリンK錠1mg", dosage: 2.0, unit: "mg", days: 28, totalMg: 56.0, totalG: 0.056 },
-      { yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 500.0, unit: "mg", days: 28, totalMg: 14000.0, totalG: 14.000 },
+      { rpNo: 1, rpUsage: "1日1回朝食後", rpDays: 28, yjCode: "3332001F1074", drugName: "ワルファリンK錠1mg", dosage: 2.0, unit: "mg", days: 28, totalMg: 56.0, totalG: 0.056 },
+      { rpNo: 1, rpUsage: "1日1回朝食後", rpDays: 28, yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 500.0, unit: "mg", days: 28, totalMg: 14000.0, totalG: 14.000 },
     ],
   },
 ];
@@ -599,6 +595,10 @@ function App() {
         setServerFiles(filesData.files || []);
         // 履歴読込
         loadHistoryFromServer(cleanUrl);
+        // GTIN紐付けテーブル読込
+        loadGtinMap(cleanUrl);
+        // 保留セッション読込
+        loadPendingSessions(cleanUrl);
         // WebSocket接続
         const wsUrl = cleanUrl.replace(/^http/, "ws") + "/ws";
         if (wsRef.current) { try { wsRef.current.close(); } catch (e) {} }
@@ -664,10 +664,47 @@ function App() {
   const [history, setHistory] = useState([]);
   const [drugConfirmed, setDrugConfirmed] = useState(false);
   const [lastScanResult, setLastScanResult] = useState(null);
+  const [pendingSessions, setPendingSessions] = useState([]); // 一時保存セッション
+  const [showAddDrug, setShowAddDrug] = useState(false); // 薬剤追加ダイアログ
+  const [addDrugGtin, setAddDrugGtin] = useState(""); // 追加薬剤のバーコード入力
+  const [addDrugInfo, setAddDrugInfo] = useState(null); // 追加薬剤のGTIN解析結果
+  const [addDrugName, setAddDrugName] = useState(""); // 追加薬剤名
+  const [addDrugDosage, setAddDrugDosage] = useState(""); // 1日量
+  const [addDrugUnit, setAddDrugUnit] = useState("g"); // 単位
+  const [addDrugRpNo, setAddDrugRpNo] = useState(0); // 追加先Rp番号
 
   const barcodeRef = useRef(null);
   const scaleRef = useRef(null);
   const toleranceRef = useRef(false);
+
+  // GTIN⇔レセ電コード 紐付けテーブル
+  const [gtinMap, setGtinMap] = useState({}); // { "04987123456789": { receiptCode: "612340071", drugName: "アムロジピン...", registeredAt: "..." } }
+  const [showGtinRegister, setShowGtinRegister] = useState(false);
+  const [pendingGtin, setPendingGtin] = useState(null); // 未登録GTINの一時保持
+
+  // サーバーからGTIN紐付けテーブル読込
+  const loadGtinMap = useCallback(async (baseUrl) => {
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/gtinmap`);
+      const data = await res.json();
+      if (data.map) setGtinMap(data.map);
+    } catch (e) {}
+  }, []);
+
+  // GTIN紐付け保存
+  const saveGtinMapping = async (gtin14, drugInfo) => {
+    const newMap = { ...gtinMap, [gtin14]: { ...drugInfo, registeredAt: new Date().toISOString() } };
+    setGtinMap(newMap);
+    if (serverStatus === "connected") {
+      try {
+        const cleanUrl = serverUrl.replace(/\/+$/, "");
+        await fetch(`${cleanUrl}/api/gtinmap`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(newMap),
+        });
+      } catch (e) { console.error("GTIN保存エラー:", e); }
+    }
+  };
 
   const currentDrug = selectedPatient?.prescriptions[currentDrugIndex];
 
@@ -726,10 +763,11 @@ function App() {
     return drugMaster.find((d) => d.yjCode === yjCode);
   };
 
-  // バーコードスキャン → GS-1パース → 照合
+  // バーコードスキャン → GS-1パース → 処方内の未秤量薬を検索
   const handleBarcodeScan = () => {
     setErrorMsg("");
     setLastScanResult(null);
+    setShowGtinRegister(false);
     const raw = barcodeInput.trim();
     if (!raw) return;
 
@@ -737,48 +775,76 @@ function App() {
     setLastScanResult(parsed);
 
     if (!parsed.gtin14 && !parsed.gtin) {
-      // GS-1形式でない場合、生の値をGTIN-14として扱う
-      const padded = raw.padStart(14, "0");
-      parsed.gtin14 = padded;
+      parsed.gtin14 = raw.padStart(14, "0");
     }
 
-    // 照合方法1: GTIN-14でマスター検索
-    const masterDrug = lookupDrugByGTIN(parsed.gtin14);
+    const gtin = parsed.gtin14;
+    const mapping = gtinMap[gtin];
 
-    // 照合方法2: 処方のYJコードとマスターのYJコードで突き合わせ
-    if (currentDrug) {
-      let matched = false;
+    if (!selectedPatient) return;
 
-      if (masterDrug) {
-        // マスターにGTINが見つかった → そのYJコードと処方のYJコードを比較
-        if (masterDrug.yjCode === currentDrug.yjCode) {
-          matched = true;
-        }
-        // YJコードの先頭9桁一致でも可（包装違い対応）
-        else if (masterDrug.yjCode?.substring(0, 9) === currentDrug.yjCode?.substring(0, 9)) {
-          matched = true;
-        }
-      }
+    // 確定済みの薬品名リスト
+    const confirmedNames = confirmedDrugs.map(d => d.drugName);
 
-      // マスター未登録でもデモ用：GTINの下12桁がモック用コードと一致
-      if (!matched && !masterDrug) {
-        // デモモード: バーコード入力値がYJコードそのものなら通す
-        if (raw === currentDrug.yjCode) {
-          matched = true;
-        }
-      }
+    if (mapping) {
+      // 登録済みGTIN → 処方内の未秤量薬から一致を探す
+      const matchIdx = selectedPatient.prescriptions.findIndex((rx, i) => {
+        if (confirmedNames.includes(rx.drugName)) return false; // 秤量済みはスキップ
+        return (
+          (mapping.receiptCode && (mapping.receiptCode === rx.receiptCode || mapping.receiptCode === rx.code)) ||
+          (mapping.yjCode && mapping.yjCode === rx.yjCode) ||
+          (mapping.drugName && mapping.drugName === rx.drugName)
+        );
+      });
 
-      if (matched) {
+      if (matchIdx >= 0) {
         playSound("confirm");
+        setCurrentDrugIndex(matchIdx);
         setStep(STEPS.WEIGHING);
         setTimeout(() => scaleRef.current?.focus(), 100);
       } else {
         playSound("error");
-        const scannedName = masterDrug ? masterDrug.name : `GTIN: ${parsed.gtin14}`;
-        setErrorMsg(`薬剤不一致！\n読取: ${scannedName}\n処方: ${currentDrug.drugName}（YJ: ${currentDrug.yjCode}）`);
+        // 処方にない or 秤量済み
+        const alreadyDone = selectedPatient.prescriptions.some((rx) =>
+          confirmedNames.includes(rx.drugName) && mapping.drugName === rx.drugName
+        );
+        if (alreadyDone) {
+          setErrorMsg(`${mapping.drugName} は秤量済みです`);
+        } else {
+          setErrorMsg(`${mapping.drugName} はこの処方に含まれていません`);
+        }
         setBarcodeInput("");
         setTimeout(() => barcodeRef.current?.focus(), 100);
       }
+    } else {
+      // 未登録GTIN → 登録ダイアログ表示
+      playSound("confirm");
+      setPendingGtin(gtin);
+      setShowGtinRegister(true);
+    }
+  };
+
+  // 初回登録: 処方リストから選んでGTIN紐付け → そのまま秤量開始
+  const registerGtinWithDrug = async (drug, rxIndex) => {
+    if (!pendingGtin) return;
+    await saveGtinMapping(pendingGtin, {
+      drugName: drug.drugName,
+      receiptCode: drug.receiptCode || drug.code || "",
+      yjCode: drug.yjCode || "",
+    });
+    setShowGtinRegister(false);
+    setPendingGtin(null);
+
+    // 登録した薬が未秤量なら、そのまま秤量開始
+    const confirmedNames = confirmedDrugs.map(d => d.drugName);
+    if (!confirmedNames.includes(drug.drugName)) {
+      playSound("confirm");
+      setCurrentDrugIndex(rxIndex);
+      setStep(STEPS.WEIGHING);
+      setTimeout(() => scaleRef.current?.focus(), 100);
+    } else {
+      setErrorMsg(`${drug.drugName} は秤量済みです`);
+      setBarcodeInput("");
     }
   };
 
@@ -801,10 +867,12 @@ function App() {
         playSound("confirm");
         setConfirmedDrugs((prev) => [...prev, { ...currentDrug, measuredG: prevScaleValue, timestamp: new Date().toISOString() }]);
         setTimeout(() => {
-          if (currentDrugIndex + 1 < selectedPatient.prescriptions.length) {
-            setCurrentDrugIndex((i) => i + 1);
+          const newConfirmedCount = confirmedDrugs.length + 1;
+          if (newConfirmedCount < selectedPatient.prescriptions.length) {
+            // まだ未秤量の薬がある → スキャン待ちに戻る
             setScaleValue(0); setPrevScaleValue(0); setDrugConfirmed(false);
             setBarcodeInput(""); setLastScanResult(null); setStep(STEPS.SCAN_DRUG);
+            setTimeout(() => barcodeRef.current?.focus(), 100);
           } else {
             setStep(STEPS.COMPLETE);
           }
@@ -860,10 +928,129 @@ function App() {
     } catch (e) {}
   }, []);
 
+  // ── 一時保存（保留） ──
+  const savePendingSession = async () => {
+    if (!selectedPatient) return;
+    const session = {
+      id: `PND-${Date.now()}`,
+      patient: selectedPatient,
+      confirmedDrugs: [...confirmedDrugs],
+      savedAt: new Date().toISOString(),
+      totalPrescriptions: selectedPatient.prescriptions.length,
+    };
+    const updated = [...pendingSessions.filter(s => s.patient.id !== selectedPatient.id), session];
+    setPendingSessions(updated);
+    if (serverStatus === "connected") {
+      try {
+        const cleanUrl = serverUrl.replace(/\/+$/, "");
+        await fetch(`${cleanUrl}/api/pending`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessions: updated }),
+        });
+      } catch (e) {}
+    }
+    resetAll();
+  };
+
+  // 保留セッションを再開
+  const resumeSession = (session) => {
+    setSelectedPatient(session.patient);
+    setConfirmedDrugs(session.confirmedDrugs || []);
+    setCurrentDrugIndex(0);
+    setBarcodeInput(""); setScaleValue(0); setPrevScaleValue(0);
+    setDrugConfirmed(false); setErrorMsg(""); setLastScanResult(null);
+    setStep(STEPS.SCAN_DRUG);
+    // 保留リストから削除
+    const updated = pendingSessions.filter(s => s.id !== session.id);
+    setPendingSessions(updated);
+    if (serverStatus === "connected") {
+      try {
+        const cleanUrl = serverUrl.replace(/\/+$/, "");
+        fetch(`${cleanUrl}/api/pending`, {
+          method: "POST", headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ sessions: updated }),
+        });
+      } catch (e) {}
+    }
+  };
+
+  // サーバーから保留セッション読込
+  const loadPendingSessions = useCallback(async (baseUrl) => {
+    try {
+      const res = await fetch(`${baseUrl.replace(/\/+$/, "")}/api/pending`);
+      const data = await res.json();
+      if (data.sessions) setPendingSessions(data.sessions);
+    } catch (e) {}
+  }, []);
+
   const resetAll = () => {
     setStep(STEPS.SELECT_PATIENT); setSelectedPatient(null); setCurrentDrugIndex(0);
     setConfirmedDrugs([]); setBarcodeInput(""); setScaleValue(0); setPrevScaleValue(0);
     setDrugConfirmed(false); setErrorMsg(""); setLastScanResult(null);
+    setShowAddDrug(false);
+  };
+
+  // ── 薬剤追加 ──
+  const openAddDrug = () => {
+    setShowAddDrug(true);
+    setAddDrugGtin(""); setAddDrugInfo(null); setAddDrugName("");
+    setAddDrugDosage(""); setAddDrugUnit("g"); setAddDrugRpNo(0);
+  };
+
+  const scanAddDrug = () => {
+    const raw = addDrugGtin.trim();
+    if (!raw) return;
+    const parsed = parseGS1Barcode(raw);
+    if (!parsed.gtin14) parsed.gtin14 = raw.padStart(14, "0");
+    setAddDrugInfo(parsed);
+    // gtinMapに登録済みなら薬品名を自動セット
+    const mapping = gtinMap[parsed.gtin14];
+    if (mapping) setAddDrugName(mapping.drugName);
+  };
+
+  const confirmAddDrug = () => {
+    if (!selectedPatient || !addDrugName || !addDrugDosage) return;
+    // 追加先Rpの情報を取得
+    const rpDrugs = selectedPatient.prescriptions.filter(rx => rx.rpNo === addDrugRpNo);
+    const rpDays = rpDrugs.length > 0 ? rpDrugs[0].rpDays || rpDrugs[0].days : 0;
+    const rpUsage = rpDrugs.length > 0 ? rpDrugs[0].rpUsage || "" : "";
+    const dosage = parseFloat(addDrugDosage) || 0;
+    const days = rpDays;
+    let totalG, totalMg;
+    if (addDrugUnit === "mg" || addDrugUnit === "MG") {
+      totalMg = dosage * days; totalG = totalMg / 1000;
+    } else {
+      totalG = dosage * days; totalMg = totalG * 1000;
+    }
+
+    const newDrug = {
+      drugName: addDrugName,
+      dosage, unit: addDrugUnit, days, totalG, totalMg,
+      rpNo: addDrugRpNo, rpUsage, rpDays: days,
+      isAdded: true, // 手動追加フラグ
+      yjCode: "", receiptCode: "", code: "",
+    };
+
+    // GTIN紐付けも保存
+    if (addDrugInfo?.gtin14 && addDrugName) {
+      saveGtinMapping(addDrugInfo.gtin14, { drugName: addDrugName, receiptCode: "", yjCode: "" });
+    }
+
+    // 処方リストに追加
+    const updated = { ...selectedPatient, prescriptions: [...selectedPatient.prescriptions, newDrug] };
+    setSelectedPatient(updated);
+    setShowAddDrug(false);
+  };
+
+  // Rpグループを取得するヘルパー
+  const getRpGroups = (prescriptions) => {
+    const groups = {};
+    (prescriptions || []).forEach((rx) => {
+      const rp = rx.rpNo || 0;
+      if (!groups[rp]) groups[rp] = { rpNo: rp, usage: rx.rpUsage || "", days: rx.rpDays || rx.days || 0, drugs: [] };
+      groups[rp].drugs.push(rx);
+    });
+    return Object.values(groups).sort((a, b) => a.rpNo - b.rpNo);
   };
 
   useEffect(() => {
@@ -1120,6 +1307,41 @@ function App() {
             {/* STEP 0: 患者選択 */}
             {step === STEPS.SELECT_PATIENT && (
               <div>
+                {/* 保留中セッション */}
+                {pendingSessions.length > 0 && (
+                  <div style={{ marginBottom: 20 }}>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: "#92400e", marginBottom: 10, display: "flex", alignItems: "center", gap: 8 }}>
+                      ⏸ 保留中（{pendingSessions.length}件）
+                    </div>
+                    <div style={{ display: "flex", flexDirection: "column", gap: 8 }}>
+                      {pendingSessions.map((s) => (
+                        <button key={s.id} onClick={() => resumeSession(s)} style={{
+                          ...cardStyle, padding: "14px 20px", cursor: "pointer", textAlign: "left", color: C.text,
+                          borderColor: "#fbbf24", background: C.warningLight,
+                        }}>
+                          <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
+                            <div>
+                              <div style={{ fontSize: 16, fontWeight: 700 }}>
+                                ⏸ {s.patient.name}
+                                <span style={{ fontSize: 13, color: C.textMuted, fontWeight: 400, marginLeft: 8 }}>{s.patient.kana}</span>
+                              </div>
+                              <div style={{ fontSize: 13, color: "#92400e", marginTop: 3 }}>
+                                {s.confirmedDrugs.length}/{s.totalPrescriptions}剤 秤量済み — タップで再開
+                              </div>
+                            </div>
+                            <div style={{ background: "#fef3c7", borderRadius: 20, padding: "5px 14px", fontSize: 13, color: "#92400e", fontWeight: 600 }}>
+                              残り{s.totalPrescriptions - s.confirmedDrugs.length}剤
+                            </div>
+                          </div>
+                          <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>
+                            済: {s.confirmedDrugs.map(d => d.drugName).join("、")}
+                          </div>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+
                 <div style={{ textAlign: "center", margin: "32px 0 24px" }}>
                   <div style={{ fontSize: 40, marginBottom: 8 }}>📂</div>
                   <div style={{ fontSize: 16, fontWeight: 600 }}>患者を選択してください</div>
@@ -1158,46 +1380,167 @@ function App() {
                     <span style={{ fontSize: 15, fontWeight: 700 }}>{selectedPatient.name}</span>
                     <span style={{ color: C.textMuted, fontSize: 13 }}>{selectedPatient.age}歳 {selectedPatient.gender}</span>
                   </div>
-                  <button onClick={resetAll} style={{ background: C.dangerLight, border: `1px solid #fca5a5`, borderRadius: 8, color: C.danger, padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕ 中断</button>
+                  <div style={{ display: "flex", gap: 6 }}>
+                    {confirmedDrugs.length > 0 && (
+                      <button onClick={savePendingSession} style={{ background: C.warningLight, border: "1px solid #fbbf24", borderRadius: 8, color: "#92400e", padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>⏸ 一時保存</button>
+                    )}
+                    <button onClick={resetAll} style={{ background: C.dangerLight, border: "1px solid #fca5a5", borderRadius: 8, color: C.danger, padding: "6px 14px", cursor: "pointer", fontSize: 12, fontWeight: 600 }}>✕ 中断</button>
+                  </div>
                 </div>
 
                 <div style={{ background: "#e2e8f0", borderRadius: 8, height: 7, marginBottom: 14, overflow: "hidden" }}>
                   <div style={{ height: "100%", borderRadius: 8, background: step === STEPS.COMPLETE ? `linear-gradient(90deg,${C.success},#34d399)` : `linear-gradient(90deg,${C.primary},#60a5fa)`, width: `${progressPercent}%`, transition: "width 0.5s" }} />
                 </div>
 
-                <div style={{ display: "grid", gridTemplateColumns: `repeat(${selectedPatient.prescriptions.length},1fr)`, gap: 8, marginBottom: 16 }}>
-                  {selectedPatient.prescriptions.map((rx, i) => {
-                    const done = i < confirmedDrugs.length;
-                    const cur = i === currentDrugIndex && step !== STEPS.COMPLETE;
-                    return (
-                      <div key={i} style={{
-                        background: done ? C.successLight : cur ? C.primaryLight : C.card,
-                        border: `2px solid ${done ? C.successBorder : cur ? C.primary : C.border}`,
-                        borderRadius: 12, padding: "10px 12px", textAlign: "center", position: "relative",
-                      }}>
-                        {done && <div style={{ position: "absolute", top: 5, right: 7, fontSize: 14, color: C.success }}>✓</div>}
-                        {cur && <div style={{ position: "absolute", top: 0, left: 0, right: 0, height: 3, background: `linear-gradient(90deg,${C.primary},#60a5fa)` }} />}
-                        <div style={{ fontSize: 12, fontWeight: 600, marginBottom: 3 }}>{rx.drugName}</div>
-                        <div style={{ fontSize: 19, fontWeight: 700, color: cur ? C.primary : C.textSub }}>{rx.totalG.toFixed(3)}g</div>
-                        <div style={{ fontSize: 11, color: C.textMuted }}>{rx.dosage}{rx.unit}×{rx.days}日</div>
-                        {done && <div style={{ fontSize: 11, color: C.success, marginTop: 3, fontWeight: 600 }}>実測: {confirmedDrugs[i].measuredG.toFixed(3)}g</div>}
+                {/* 処方一覧（Rpグループ表示） */}
+                {getRpGroups(selectedPatient.prescriptions).map((rp) => (
+                  <div key={rp.rpNo} style={{ ...cardStyle, padding: "12px 16px", marginBottom: 10 }}>
+                    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center", marginBottom: 8 }}>
+                      <div style={{ fontSize: 13, fontWeight: 700, color: C.primary }}>
+                        Rp.{rp.rpNo} <span style={{ fontWeight: 400, color: C.textSub, marginLeft: 6 }}>{rp.usage}</span>
+                        <span style={{ fontWeight: 400, color: C.textMuted, marginLeft: 6 }}>({rp.days}日分)</span>
                       </div>
-                    );
-                  })}
-                </div>
+                      {step === STEPS.SCAN_DRUG && (
+                        <button onClick={() => { openAddDrug(); setAddDrugRpNo(rp.rpNo); }} style={{
+                          background: C.bg, border: `1px solid ${C.border}`, borderRadius: 6,
+                          color: C.primary, padding: "3px 10px", cursor: "pointer", fontSize: 11, fontWeight: 600,
+                        }}>＋ 薬剤追加</button>
+                      )}
+                    </div>
+                    <div style={{ display: "grid", gridTemplateColumns: `repeat(${Math.min(rp.drugs.length, 4)},1fr)`, gap: 6 }}>
+                      {rp.drugs.map((rx, i) => {
+                        const globalIdx = selectedPatient.prescriptions.indexOf(rx);
+                        const done = confirmedDrugs.some(d => d.drugName === rx.drugName);
+                        const cur = globalIdx === currentDrugIndex && step === STEPS.WEIGHING;
+                        return (
+                          <div key={i} style={{
+                            background: done ? C.successLight : cur ? C.primaryLight : C.card,
+                            border: `2px solid ${done ? C.successBorder : cur ? C.primary : C.border}`,
+                            borderRadius: 10, padding: "8px 10px", textAlign: "center", position: "relative",
+                          }}>
+                            {done && <div style={{ position: "absolute", top: 4, right: 6, fontSize: 13, color: C.success }}>✓</div>}
+                            {rx.isAdded && <div style={{ position: "absolute", top: 4, left: 6, fontSize: 10, color: C.warning }}>追加</div>}
+                            <div style={{ fontSize: 11, fontWeight: 600, marginBottom: 2 }}>{rx.drugName}</div>
+                            <div style={{ fontSize: 17, fontWeight: 700, color: cur ? C.primary : done ? C.success : C.textSub }}>{rx.totalG.toFixed(3)}g</div>
+                            <div style={{ fontSize: 10, color: C.textMuted }}>{rx.dosage}{rx.unit}/日</div>
+                            {done && confirmedDrugs.find(d => d.drugName === rx.drugName) && (
+                              <div style={{ fontSize: 10, color: confirmedDrugs.find(d => d.drugName === rx.drugName)?.forcedConfirm ? "#f97316" : C.success, marginTop: 2, fontWeight: 600 }}>
+                                {confirmedDrugs.find(d => d.drugName === rx.drugName)?.forcedConfirm ? "⚠ " : ""}
+                                実測: {confirmedDrugs.find(d => d.drugName === rx.drugName).measuredG.toFixed(3)}g
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                ))}
+
+                {/* 薬剤追加ダイアログ */}
+                {showAddDrug && (
+                  <div style={{ ...cardStyle, padding: 20, marginBottom: 10, background: C.warningLight, borderColor: "#fbbf24" }}>
+                    <div style={{ fontSize: 15, fontWeight: 700, color: "#92400e", marginBottom: 12 }}>
+                      ＋ Rp.{addDrugRpNo} に薬剤を追加
+                      <span style={{ fontSize: 12, fontWeight: 400, color: C.textSub, marginLeft: 8 }}>
+                        ({getRpGroups(selectedPatient.prescriptions).find(r => r.rpNo === addDrugRpNo)?.days || 0}日分)
+                      </span>
+                    </div>
+
+                    {/* バーコード読取 */}
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 4 }}>① 容器のバーコードをスキャン</div>
+                      <div style={{ display: "flex", gap: 8 }}>
+                        <input value={addDrugGtin} onChange={(e) => setAddDrugGtin(e.target.value)}
+                          placeholder="バーコードをスキャン"
+                          style={{ flex: 1, padding: "8px 12px", fontSize: 14, border: `1px solid ${C.border}`, borderRadius: 8, outline: "none" }}
+                          onKeyDown={(e) => e.key === "Enter" && scanAddDrug()}
+                          autoFocus
+                        />
+                        <button onClick={scanAddDrug} style={{ padding: "8px 16px", fontSize: 13, background: C.primary, color: "#fff", border: "none", borderRadius: 8, cursor: "pointer", fontWeight: 600 }}>読取</button>
+                      </div>
+                      {addDrugInfo && (
+                        <div style={{ fontSize: 11, color: C.textSub, marginTop: 4 }}>
+                          GTIN: <span style={{ fontFamily: "monospace" }}>{addDrugInfo.gtin14}</span>
+                          {gtinMap[addDrugInfo.gtin14] && <span style={{ color: C.success, marginLeft: 8 }}>✅ 登録済: {gtinMap[addDrugInfo.gtin14].drugName}</span>}
+                        </div>
+                      )}
+                    </div>
+
+                    {/* 薬品名 */}
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 4 }}>② 薬品名</div>
+                      <input value={addDrugName} onChange={(e) => setAddDrugName(e.target.value)}
+                        placeholder="薬品名を入力（例: 乳糖）"
+                        style={{ width: "100%", padding: "8px 12px", fontSize: 14, border: `1px solid ${C.border}`, borderRadius: 8, outline: "none", boxSizing: "border-box" }}
+                      />
+                    </div>
+
+                    {/* 1日量 + 単位 */}
+                    <div style={{ marginBottom: 12 }}>
+                      <div style={{ fontSize: 12, fontWeight: 600, color: C.text, marginBottom: 4 }}>③ 1日量</div>
+                      <div style={{ display: "flex", gap: 8, alignItems: "center" }}>
+                        <input value={addDrugDosage} onChange={(e) => setAddDrugDosage(e.target.value)}
+                          placeholder="0.300" type="number" step="0.001"
+                          style={{ width: 140, padding: "8px 12px", fontSize: 16, border: `1px solid ${C.border}`, borderRadius: 8, outline: "none", textAlign: "right" }}
+                        />
+                        <select value={addDrugUnit} onChange={(e) => setAddDrugUnit(e.target.value)}
+                          style={{ padding: "8px 12px", fontSize: 14, border: `1px solid ${C.border}`, borderRadius: 8, outline: "none" }}>
+                          <option value="g">g</option>
+                          <option value="mg">mg</option>
+                        </select>
+                        <span style={{ fontSize: 13, color: C.textSub }}>
+                          × {getRpGroups(selectedPatient.prescriptions).find(r => r.rpNo === addDrugRpNo)?.days || 0}日
+                          = <b style={{ color: C.primary }}>
+                            {addDrugDosage ? (
+                              addDrugUnit === "mg"
+                                ? ((parseFloat(addDrugDosage) || 0) * (getRpGroups(selectedPatient.prescriptions).find(r => r.rpNo === addDrugRpNo)?.days || 0) / 1000).toFixed(3) + "g"
+                                : ((parseFloat(addDrugDosage) || 0) * (getRpGroups(selectedPatient.prescriptions).find(r => r.rpNo === addDrugRpNo)?.days || 0)).toFixed(3) + "g"
+                            ) : "—"}
+                          </b>
+                        </span>
+                      </div>
+                    </div>
+
+                    {/* ボタン */}
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <button onClick={confirmAddDrug} disabled={!addDrugName || !addDrugDosage} style={{
+                        padding: "10px 24px", fontSize: 14, fontWeight: 600, borderRadius: 8, cursor: "pointer", border: "none",
+                        background: addDrugName && addDrugDosage ? C.primary : "#cbd5e1", color: "#fff",
+                      }}>追加して秤量へ</button>
+                      <button onClick={() => setShowAddDrug(false)} style={{
+                        padding: "10px 20px", fontSize: 13, background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8, cursor: "pointer", color: C.textSub,
+                      }}>キャンセル</button>
+                    </div>
+                  </div>
+                )}
               </>
             )}
 
-            {/* STEP 1: バーコード読取 */}
-            {step === STEPS.SCAN_DRUG && currentDrug && (
+            {/* STEP 1: バーコード読取（自由順） */}
+            {step === STEPS.SCAN_DRUG && selectedPatient && (
               <div style={{ ...cardStyle, padding: 28, textAlign: "center" }}>
                 <div style={{ fontSize: 44, marginBottom: 8 }}>📷</div>
-                <div style={{ fontSize: 19, fontWeight: 700, marginBottom: 8 }}>バーコードを読み取ってください</div>
-                <div style={{ fontSize: 14, color: C.primary, fontWeight: 600, background: C.primaryLight, borderRadius: 10, padding: "8px 20px", display: "inline-block", marginBottom: 6 }}>
-                  対象: {currentDrug.drugName}
+                <div style={{ fontSize: 19, fontWeight: 700, marginBottom: 10 }}>容器のバーコードを読み取ってください</div>
+                <div style={{ fontSize: 13, color: C.textSub, marginBottom: 14 }}>
+                  残り {selectedPatient.prescriptions.length - confirmedDrugs.length}剤 — どの薬からでもOK
                 </div>
-                <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 16 }}>
-                  YJコード: {currentDrug.yjCode} {drugMaster.length === 0 ? "（デモ: YJコードを直接入力してEnter）" : ""}
+
+                {/* 未秤量の薬一覧 */}
+                <div style={{ display: "flex", flexWrap: "wrap", justifyContent: "center", gap: 8, marginBottom: 16 }}>
+                  {selectedPatient.prescriptions.map((rx, i) => {
+                    const done = confirmedDrugs.some(d => d.drugName === rx.drugName);
+                    return (
+                      <div key={i} style={{
+                        padding: "6px 14px", borderRadius: 8, fontSize: 13,
+                        background: done ? C.successLight : C.primaryLight,
+                        color: done ? C.success : C.primary,
+                        border: `1px solid ${done ? C.successBorder : "rgba(59,130,246,0.2)"}`,
+                        fontWeight: 600, opacity: done ? 0.6 : 1,
+                      }}>
+                        {done ? "✓ " : ""}{rx.drugName}
+                      </div>
+                    );
+                  })}
                 </div>
 
                 <div style={{ maxWidth: 480, margin: "0 auto" }}>
@@ -1211,13 +1554,60 @@ function App() {
                   <button onClick={handleBarcodeScan} style={{ marginTop: 10, padding: "10px 34px", fontSize: 14, background: C.primary, border: "none", borderRadius: 10, color: "#fff", cursor: "pointer", fontWeight: 600 }}>照合する</button>
                 </div>
 
-                {lastScanResult && (
+                {lastScanResult && !showGtinRegister && (
                   <div style={{ marginTop: 16, ...cardStyle, padding: 14, textAlign: "left", fontSize: 12, color: C.textSub }}>
                     <div style={{ fontWeight: 600, marginBottom: 6, color: C.text }}>GS-1パース結果:</div>
                     <div>GTIN-14: <span style={{ fontFamily: "monospace", color: C.primary }}>{lastScanResult.gtin14 || "—"}</span></div>
                     {lastScanResult.expiry && <div>有効期限: {lastScanResult.expiry.formatted}</div>}
                     {lastScanResult.lot && <div>ロット: {lastScanResult.lot}</div>}
                     {lastScanResult.errors?.length > 0 && <div style={{ color: C.warning }}>{lastScanResult.errors.join(", ")}</div>}
+                  </div>
+                )}
+
+                {/* ── 初回GTIN登録ダイアログ ── */}
+                {showGtinRegister && pendingGtin && (
+                  <div style={{
+                    marginTop: 16, background: C.warningLight, border: `2px solid #fbbf24`,
+                    borderRadius: 14, padding: 20, textAlign: "left",
+                  }}>
+                    <div style={{ fontSize: 16, fontWeight: 700, color: "#92400e", marginBottom: 4 }}>
+                      📋 初回登録：この容器はどの薬ですか？
+                    </div>
+                    <div style={{ fontSize: 12, color: "#92400e", marginBottom: 14 }}>
+                      GTIN: <span style={{ fontFamily: "monospace" }}>{pendingGtin}</span> — まだ登録されていません。下から選んでください。
+                    </div>
+
+                    {selectedPatient && (
+                      <div>
+                        <div style={{ fontSize: 13, fontWeight: 600, color: C.text, marginBottom: 8 }}>
+                          {selectedPatient.name}さんの未秤量薬:
+                        </div>
+                        <div style={{ display: "flex", flexDirection: "column", gap: 6 }}>
+                          {selectedPatient.prescriptions.map((rx, i) => {
+                            const done = confirmedDrugs.some(d => d.drugName === rx.drugName);
+                            if (done) return null;
+                            return (
+                              <button key={i} onClick={() => registerGtinWithDrug(rx, i)} style={{
+                                padding: "12px 16px", borderRadius: 10, cursor: "pointer",
+                                border: `2px solid ${C.border}`,
+                                background: "#fff",
+                                textAlign: "left", color: C.text, fontSize: 14,
+                              }}>
+                                <div style={{ fontWeight: 600 }}>{rx.drugName}</div>
+                                <div style={{ fontSize: 11, color: C.textMuted, marginTop: 2 }}>
+                                  {rx.receiptCode || rx.code || rx.yjCode || ""} / {rx.totalG.toFixed(3)}g
+                                </div>
+                              </button>
+                            );
+                          })}
+                        </div>
+                      </div>
+                    )}
+
+                    <button onClick={() => { setShowGtinRegister(false); setPendingGtin(null); setBarcodeInput(""); }} style={{
+                      marginTop: 12, padding: "8px 20px", fontSize: 13, background: C.bg,
+                      border: `1px solid ${C.border}`, borderRadius: 8, cursor: "pointer", color: C.textSub,
+                    }}>キャンセル</button>
                   </div>
                 )}
 
@@ -1266,6 +1656,40 @@ function App() {
                 }}>
                   {drugConfirmed ? "✅ 確定！次の薬剤へ..." : isWithinTolerance ? "🔔 許容範囲内！0を入力して確定" : scaleValue > 0 ? "⏳ 秤量中..." : "⚖️ 薬剤を秤に載せてください"}
                 </div>
+
+                {/* 手動確定ボタン */}
+                {!drugConfirmed && scaleValue > 0 && (
+                  <button onClick={() => {
+                    const forced = !isWithinTolerance;
+                    setDrugConfirmed(true);
+                    playSound("confirm");
+                    setConfirmedDrugs((prev) => [...prev, {
+                      ...currentDrug,
+                      measuredG: scaleValue,
+                      timestamp: new Date().toISOString(),
+                      forcedConfirm: forced,
+                      errorPercent: currentDrug.totalG > 0 ? Math.abs(scaleValue - currentDrug.totalG) / currentDrug.totalG * 100 : 0,
+                    }]);
+                    setTimeout(() => {
+                      const newCount = confirmedDrugs.length + 1;
+                      if (newCount < selectedPatient.prescriptions.length) {
+                        setScaleValue(0); setPrevScaleValue(0); setDrugConfirmed(false);
+                        setBarcodeInput(""); setLastScanResult(null); setStep(STEPS.SCAN_DRUG);
+                        setTimeout(() => barcodeRef.current?.focus(), 100);
+                      } else {
+                        setStep(STEPS.COMPLETE);
+                      }
+                    }, 1200);
+                  }} style={{
+                    marginTop: 12, padding: "10px 28px", fontSize: 14, fontWeight: 600,
+                    borderRadius: 10, cursor: "pointer",
+                    background: isWithinTolerance ? C.success : "#f97316",
+                    color: "#fff", border: "none",
+                    boxShadow: isWithinTolerance ? "0 2px 8px rgba(16,185,129,0.2)" : "0 2px 8px rgba(249,115,22,0.2)",
+                  }}>
+                    {isWithinTolerance ? "✅ 手動確定" : "⚠️ 強制確定（範囲外）"}
+                  </button>
+                )}
               </div>
             )}
 
@@ -1277,9 +1701,15 @@ function App() {
                 <div style={{ fontSize: 14, color: C.textSub, marginBottom: 22 }}>{selectedPatient.name} の調剤記録</div>
                 <div style={{ ...cardStyle, padding: 18, textAlign: "left", maxWidth: 500, margin: "0 auto 22px" }}>
                   {confirmedDrugs.map((d, i) => (
-                    <div key={i} style={{ display: "flex", justifyContent: "space-between", padding: "10px 0", borderBottom: i < confirmedDrugs.length - 1 ? `1px solid ${C.border}` : "none" }}>
-                      <span style={{ fontSize: 14, fontWeight: 500 }}>{d.drugName}</span>
-                      <span style={{ fontSize: 14, fontWeight: 700, color: C.success }}>{d.measuredG.toFixed(3)}g <span style={{ color: C.textMuted, fontWeight: 400, fontSize: 12 }}>(目標{d.totalG.toFixed(3)}g)</span></span>
+                    <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "10px 0", borderBottom: i < confirmedDrugs.length - 1 ? `1px solid ${C.border}` : "none" }}>
+                      <span style={{ fontSize: 14, fontWeight: 500 }}>
+                        {d.drugName}
+                        {d.forcedConfirm && <span style={{ fontSize: 10, color: "#f97316", marginLeft: 6, fontWeight: 700, background: "#fff7ed", padding: "2px 6px", borderRadius: 4 }}>⚠ 強制確定</span>}
+                      </span>
+                      <span style={{ fontSize: 14, fontWeight: 700, color: d.forcedConfirm ? "#f97316" : C.success }}>
+                        {d.measuredG.toFixed(3)}g
+                        <span style={{ color: C.textMuted, fontWeight: 400, fontSize: 12 }}> (目標{d.totalG.toFixed(3)}g{d.forcedConfirm ? ` 誤差${d.errorPercent?.toFixed(1)}%` : ""})</span>
+                      </span>
                     </div>
                   ))}
                 </div>

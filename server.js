@@ -27,6 +27,7 @@ const PORT = 3456;                       // サーバーポート
 const POLL_INTERVAL = 2000;              // フォルダ監視間隔(ms)
 const DATA_DIR = path.join(__dirname, "data"); // 履歴等の保存先
 const HISTORY_FILE = path.join(DATA_DIR, "dispensing_history.json");
+const GTINMAP_FILE = path.join(DATA_DIR, "gtin_map.json");
 
 // ★★★ GitHub自動更新 ★★★
 // リポジトリ作成後、ここを書き換えてください
@@ -268,6 +269,54 @@ const server = http.createServer(async (req, res) => {
     }
     res.writeHead(200, { "Content-Type": "application/json" });
     res.end(JSON.stringify({ ok: true, total: historyRecords.length }));
+    return;
+  }
+
+  // ── API: GTIN紐付けテーブル取得 ──
+  if (pathname === "/api/gtinmap" && req.method === "GET") {
+    let map = {};
+    try { if (fs.existsSync(GTINMAP_FILE)) map = JSON.parse(fs.readFileSync(GTINMAP_FILE, "utf-8")); } catch (e) {}
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ map, count: Object.keys(map).length }));
+    return;
+  }
+
+  // ── API: GTIN紐付けテーブル保存 ──
+  if (pathname === "/api/gtinmap" && req.method === "POST") {
+    try {
+      const map = JSON.parse(await readBody(req));
+      fs.writeFileSync(GTINMAP_FILE, JSON.stringify(map, null, 2), "utf-8");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, count: Object.keys(map).length }));
+      console.log(`[${new Date().toLocaleTimeString()}] GTIN紐付け保存: ${Object.keys(map).length}件`);
+    } catch (e) {
+      res.writeHead(400); res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // ── API: 保留セッション取得 ──
+  if (pathname === "/api/pending" && req.method === "GET") {
+    const PENDING_FILE = path.join(DATA_DIR, "pending_sessions.json");
+    let sessions = [];
+    try { if (fs.existsSync(PENDING_FILE)) sessions = JSON.parse(fs.readFileSync(PENDING_FILE, "utf-8")); } catch (e) {}
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    res.end(JSON.stringify({ sessions }));
+    return;
+  }
+
+  // ── API: 保留セッション保存 ──
+  if (pathname === "/api/pending" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req));
+      const PENDING_FILE = path.join(DATA_DIR, "pending_sessions.json");
+      fs.writeFileSync(PENDING_FILE, JSON.stringify(body.sessions || [], null, 2), "utf-8");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, count: (body.sessions || []).length }));
+      console.log(`[${new Date().toLocaleTimeString()}] 保留セッション保存: ${(body.sessions || []).length}件`);
+    } catch (e) {
+      res.writeHead(400); res.end(JSON.stringify({ error: e.message }));
+    }
     return;
   }
 
