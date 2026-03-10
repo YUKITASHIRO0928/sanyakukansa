@@ -437,20 +437,20 @@ function parseELIXIRFormat(text) {
   const result = { patients: [], errors: [] };
   
   let pharmacyName = "";
-  let patientName = "", patientKana = "", patientGender = "", patientBirthDate = "", patientAge = 0;
+  let patientName = "", patientKana = "", patientGender = "", patientAge = 0;
   let doctorName = "";
   let prescriptionDate = new Date().toISOString().substring(0, 10);
   let institutionName = "";
-  let currentRpNo = 0, currentRpUsage = "", currentRpDays = 0, currentRpTimesPerDay = 0;
+  let currentRpNo = 0, currentRpUsage = "", currentRpDays = 0;
   let prescriptions = [];
-  let hasSanzai = false; // 散剤があるかチェック
+  let patientRecordFound = false;
   
   for (const line of lines) {
     const cols = parseCSVLine(line);
-    const recType = cols[0];
+    const recType = (cols[0] || "").trim();
     
-    // VER行: VER010601,日時,,ELIXIR1,都道府県,4,薬局コード,薬局名,...
-    if (recType && recType.startsWith("VER")) {
+    // VER行
+    if (recType.startsWith("VER")) {
       pharmacyName = (cols[7] || "").trim();
       const dateStr = (cols[1] || "").substring(0, 8);
       if (dateStr.length === 8) {
@@ -463,55 +463,49 @@ function parseELIXIRFormat(text) {
     if (isNaN(recNo)) continue;
     
     switch (recNo) {
-      case 1: // 患者情報: 1,都道府県,カナ姓 カナ名,漢字姓 漢字名,性別,生年月日,...
+      case 1: // 患者情報 or 保険情報
         {
-          // cols: 1,23,タシロ ユウキ,田代　結城,1,19830928,...
-          // またはスペース区切りで cols[2]=カナ, cols[3]=漢字
-          // 性別・生年月日の位置はカラム数で変動
-          patientKana = (cols[2] || "").trim();
+          // 患者情報は cols[2]=カナ, cols[3]=漢字名 のパターン
+          // 保険情報は cols[1]=1, cols[2]=数字, cols[3]=数字 のパターン
+          // 区別: cols[2]にカタカナが含まれるかどうか
+          const field2 = (cols[2] || "").trim();
+          const field3 = (cols[3] || "").trim();
           
-          // 漢字名を探す（カナの次のフィールドで漢字が含まれるもの）
-          let nameFound = false;
-          for (let i = 3; i < Math.min(cols.length, 8); i++) {
-            const val = (cols[i] || "").trim();
-            // 漢字を含むか（日本語文字検出）
-            if (val && /[\u4e00-\u9faf\u3040-\u309f]/.test(val) && !nameFound) {
-              patientName = val;
-              nameFound = true;
-              continue;
-            }
-            // 性別（1=男, 2=女）
-            if (val === "1" || val === "2") {
-              if (!patientGender) {
+          // カタカナが含まれていれば患者情報
+          if (/[\u30A0-\u30FF]/.test(field2) && !patientRecordFound) {
+            patientRecordFound = true;
+            patientKana = field2;
+            patientName = field3;
+            
+            // 性別と生年月日を探す
+            for (let i = 4; i < Math.min(cols.length, 10); i++) {
+              const val = (cols[i] || "").trim();
+              if ((val === "1" || val === "2") && !patientGender) {
                 patientGender = val === "1" ? "男" : "女";
-                continue;
+              }
+              if (/^(19|20)\d{6}$/.test(val)) {
+                const birthYear = parseInt(val.substring(0, 4));
+                patientAge = new Date().getFullYear() - birthYear;
               }
             }
-            // 生年月日（8桁数字 19XXXXXX or 20XXXXXX）
-            if (/^(19|20)\d{6}$/.test(val)) {
-              patientBirthDate = val;
-              const birthYear = parseInt(val.substring(0, 4));
-              patientAge = new Date().getFullYear() - birthYear;
-            }
           }
-          if (!nameFound) patientName = patientKana;
         }
         break;
         
-      case 2: // 処方箋情報: 2,処方箋番号,...,医療機関コード,都道府県,医療機関名,...
+      case 2: // 処方箋情報
         {
-          // 医療機関名は後半のフィールドから探す
+          // 医療機関名を探す（後半に漢字の長い文字列）
           for (let i = 10; i < cols.length; i++) {
             const val = (cols[i] || "").trim();
-            if (val && /[\u4e00-\u9faf]/.test(val) && val.length > 2) {
+            if (val && /[\u4e00-\u9faf]/.test(val) && val.length > 3) {
               institutionName = val;
               break;
             }
           }
-          // 医師名（末尾付近にある場合）
-          for (let i = cols.length - 1; i > cols.length - 5 && i >= 0; i--) {
+          // 医師名（末尾の漢字2-10文字のフィールド）
+          for (let i = cols.length - 1; i > Math.max(cols.length - 6, 0); i--) {
             const val = (cols[i] || "").trim();
-            if (val && /[\u4e00-\u9faf]/.test(val) && val.length >= 2 && val.length <= 10) {
+            if (val && /^[\u4e00-\u9faf\u3040-\u309f\u30A0-\u30FF\s　]+$/.test(val) && val.length >= 2 && val.length <= 10) {
               doctorName = val;
               break;
             }
@@ -519,26 +513,12 @@ function parseELIXIRFormat(text) {
         }
         break;
         
-      case 3: // Rp情報: 3,RpNo,用法コード,用法テキスト,,,日数,...
+      case 3: // Rp情報
         {
           currentRpNo = parseInt(cols[1]) || (currentRpNo + 1);
           currentRpUsage = (cols[3] || "").trim();
-          // 日数を探す（数値フィールドを順番に確認）
           currentRpDays = 0;
-          currentRpTimesPerDay = 0;
-          for (let i = 4; i < Math.min(cols.length, 15); i++) {
-            const val = parseInt(cols[i]);
-            if (val > 0 && val <= 90 && currentRpDays === 0) {
-              // 最初に見つかった妥当な数値を日数候補とする
-              // ただし用法テキストから回数と日数を推定
-              if (currentRpUsage.includes("日")) {
-                // 「1日2回」→ 回数
-                const timesMatch = currentRpUsage.match(/(\d+)\s*回/);
-                if (timesMatch) currentRpTimesPerDay = parseInt(timesMatch[1]);
-              }
-            }
-          }
-          // 日数: 用法の後のフィールドから取得（位置7〜9あたり）
+          // 日数を探す
           for (let i = 6; i < Math.min(cols.length, 12); i++) {
             const val = parseInt(cols[i]);
             if (val > 0 && val <= 180) {
@@ -546,54 +526,26 @@ function parseELIXIRFormat(text) {
               break;
             }
           }
-          // 回数が取れなかった場合は用法テキストから推定
-          if (!currentRpTimesPerDay) {
-            const timesMatch = currentRpUsage.match(/(\d+)\s*回/);
-            if (timesMatch) currentRpTimesPerDay = parseInt(timesMatch[1]);
-          }
         }
         break;
         
-      case 4: // 薬品情報: 4,RpNo,SeqNo,?,YJcode,厚労省コード,,薬価,薬品名1,薬品名2,...,数量,1,単位,...
+      case 4: // 薬品情報
         {
           const rpNo = parseInt(cols[1]) || currentRpNo;
           const yjCode = (cols[4] || "").trim();
-          const drugName = (cols[8] || cols[9] || "").trim();
-          const drugNameAlt = (cols[9] || "").trim();
-          const displayName = drugNameAlt || drugName;
+          const drugName1 = (cols[8] || "").trim();
+          const drugName2 = (cols[9] || "").trim();
+          const displayName = drugName2 || drugName1;
           
-          // 単位と数量を探す（後半のフィールド）
-          let dosage = 0;
-          let unit = "g";
+          if (!displayName) break;
           
-          // 単位フィールドを探す
+          // 単位と数量を探す
+          let dosage = 0, unit = "";
           for (let i = 10; i < cols.length; i++) {
             const val = (cols[i] || "").trim();
-            if (val === "ｇ" || val === "g" || val === "G") {
-              unit = "g";
-              // 数量は単位の2-3フィールド前にある
-              for (let j = i - 1; j >= i - 4 && j >= 0; j--) {
-                const num = parseFloat(cols[j]);
-                if (num > 0) { dosage = num; break; }
-              }
-              break;
-            } else if (val === "mg" || val === "MG" || val === "ｍｇ") {
-              unit = "mg";
-              for (let j = i - 1; j >= i - 4 && j >= 0; j--) {
-                const num = parseFloat(cols[j]);
-                if (num > 0) { dosage = num; break; }
-              }
-              break;
-            } else if (val === "錠" || val === "ｶﾌﾟｾﾙ" || val === "カプセル" || val === "包") {
-              unit = val;
-              for (let j = i - 1; j >= i - 4 && j >= 0; j--) {
-                const num = parseFloat(cols[j]);
-                if (num > 0) { dosage = num; break; }
-              }
-              break;
-            } else if (val === "mL" || val === "ml" || val === "ｍＬ") {
-              unit = "mL";
-              for (let j = i - 1; j >= i - 4 && j >= 0; j--) {
+            if (/^[gGｇ]$/.test(val) || val === "mg" || val === "ｍｇ" || val === "錠" || val === "カプセル" || val === "ｶﾌﾟｾﾙ" || val === "包" || val === "mL" || val === "ml" || val === "ｍＬ") {
+              unit = val.replace("ｇ","g").replace("ｍｇ","mg").replace("ｍＬ","mL");
+              for (let j = i - 1; j >= Math.max(i - 4, 0); j--) {
                 const num = parseFloat(cols[j]);
                 if (num > 0) { dosage = num; break; }
               }
@@ -601,16 +553,15 @@ function parseELIXIRFormat(text) {
             }
           }
           
-          // 散剤判定（薬品名に散・DS・細粒・顆粒・ドライシロップが含まれる、または単位がg）
+          // 散剤判定
           const isSanzai = /散|ＤＳ|DS|細粒|顆粒|ドライシロップ|末|原末|乳糖/.test(displayName) || unit === "g";
-          if (isSanzai) hasSanzai = true;
           
           // 全量計算
           let totalG = 0, totalMg = 0;
-          if (unit === "g" || unit === "ｇ") {
+          if (unit === "g") {
             totalG = dosage * currentRpDays;
             totalMg = totalG * 1000;
-          } else if (unit === "mg" || unit === "ｍｇ") {
+          } else if (unit === "mg") {
             totalMg = dosage * currentRpDays;
             totalG = totalMg / 1000;
           } else {
@@ -619,31 +570,18 @@ function parseELIXIRFormat(text) {
           }
           
           prescriptions.push({
-            rpNo,
-            rpUsage: currentRpUsage,
-            rpDays: currentRpDays,
-            yjCode,
-            drugName: displayName,
-            dosage,
-            unit,
-            days: currentRpDays,
-            totalMg,
-            totalG,
-            isSanzai,
+            rpNo, rpUsage: currentRpUsage, rpDays: currentRpDays,
+            yjCode, drugName: displayName, dosage, unit,
+            days: currentRpDays, totalMg, totalG, isSanzai,
           });
         }
-        break;
-        
-      case 5: // 調剤量・点数 — スキップ
-      case 6: // 不明 — スキップ
-      case 7: // 加算情報 — スキップ
         break;
     }
   }
   
   if (patientName && prescriptions.length > 0) {
     result.patients.push({
-      id: `ELIXIR-${Date.now()}`,
+      id: `ELIXIR-${Date.now()}-${Math.random().toString(36).substr(2,5)}`,
       name: patientName,
       kana: patientKana,
       age: patientAge,
@@ -652,7 +590,7 @@ function parseELIXIRFormat(text) {
       doctor: doctorName,
       institution: institutionName,
       prescriptions,
-      hasSanzai,
+      hasSanzai: prescriptions.some(p => p.isSanzai),
       source: "NSIPS-ELIXIR",
     });
   }
@@ -1014,8 +952,10 @@ function App() {
             const fr = await fetch(`${cleanUrl}/api/files`);
             const fd = await fr.json();
             if (fd.files && fd.files.length > 0) {
+              // ファイルを日付順（新しい順）にソート
+              const sorted = [...fd.files].sort((a,b) => new Date(b.modified) - new Date(a.modified));
               const allPatients = [];
-              for (const f of fd.files) {
+              for (const f of sorted) {
                 try {
                   const r = await fetch(`${cleanUrl}/api/file?name=${encodeURIComponent(f.name)}`);
                   const buf = await r.arrayBuffer();
@@ -1024,12 +964,14 @@ function App() {
                   const result = parseGenericNSIPSCSV(text);
                   if (result.patients.length > 0) {
                     for (const np of result.patients) {
-                      const idx = allPatients.findIndex(p => p.name === np.name && p.prescriptionDate === np.prescriptionDate);
-                      if (idx >= 0) allPatients[idx] = np;
-                      else allPatients.push(np);
+                      // 同名患者は最新のみ保持（最初に見つかったのが最新）
+                      const existing = allPatients.findIndex(p => p.name === np.name);
+                      if (existing < 0) {
+                        allPatients.push(np);
+                      }
                     }
                   }
-                } catch (e) { console.log("NSIPS parse error:", e); }
+                } catch (e) { console.log("NSIPS parse error:", f.name, e); }
               }
               if (allPatients.length > 0) setNsipsPatients(allPatients);
               return fd.files.length;
@@ -1136,7 +1078,15 @@ function App() {
   }, [serverUrl]);
 
   // 患者リスト: NSIPS読込済なら優先、なければモック
-  const patients = nsipsPatients.length > 0 ? nsipsPatients : MOCK_PATIENTS;
+  const [dismissedPatients, setDismissedPatients] = useState([]);
+  const allPatients = nsipsPatients.length > 0 ? nsipsPatients : MOCK_PATIENTS;
+  // 散剤を含む患者のみ表示 + 削除済み除外
+  const patients = allPatients.filter(p => {
+    if (dismissedPatients.includes(p.name)) return false;
+    // NSIPSデータの場合は散剤を含む処方のみ
+    if (p.source === "NSIPS-ELIXIR") return p.hasSanzai;
+    return true; // モックデータはそのまま表示
+  });
 
   // 調剤ステート
   const [step, setStep] = useState(STEPS.SELECT_PATIENT);
@@ -1873,18 +1823,25 @@ function App() {
                 <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
                   {patients.map((p) => (
                     <button key={p.id} onClick={() => selectPatient(p)} style={{
-                      ...cardStyle, padding: "16px 22px", cursor: "pointer", textAlign: "left", color: C.text, transition: "all 0.15s",
+                      ...cardStyle, padding: "16px 22px", cursor: "pointer", textAlign: "left", color: C.text, transition: "all 0.15s", position: "relative",
                     }} onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.primary; e.currentTarget.style.boxShadow = "0 2px 12px rgba(59,130,246,0.1)"; }}
                        onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.04)"; }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                        <div>
+                        <div style={{ flex: 1 }}>
                           <div style={{ fontSize: 17, fontWeight: 700 }}>{p.name} <span style={{ fontSize: 13, color: C.textMuted, fontWeight: 400 }}>{p.kana}</span></div>
-                          <div style={{ fontSize: 13, color: C.textSub, marginTop: 3 }}>{p.age}歳 {p.gender} ／ {p.prescriptionDate} ／ {p.doctor} 医師</div>
+                          <div style={{ fontSize: 13, color: C.textSub, marginTop: 3 }}>{p.age}歳 {p.gender} ／ {p.prescriptionDate} ／ {p.doctor || p.institution || ""} {p.doctor ? "医師" : ""}</div>
                         </div>
-                        <div style={{ background: C.primaryLight, borderRadius: 20, padding: "5px 14px", fontSize: 13, color: C.primary, fontWeight: 600 }}>{p.prescriptions.length}剤</div>
+                        <div style={{ display: "flex", alignItems: "center", gap: 8 }}>
+                          <div style={{ background: C.primaryLight, borderRadius: 20, padding: "5px 14px", fontSize: 13, color: C.primary, fontWeight: 600 }}>{p.prescriptions.filter(rx => rx.isSanzai).length || p.prescriptions.length}剤</div>
+                          {p.source === "NSIPS-ELIXIR" && (
+                            <div onClick={(e) => { e.stopPropagation(); setDismissedPatients(prev => [...prev, p.name]); }}
+                              style={{ width: 24, height: 24, borderRadius: 12, background: "#fee2e2", color: "#ef4444", display: "flex", alignItems: "center", justifyContent: "center", fontSize: 14, cursor: "pointer", fontWeight: 700 }}
+                              title="リストから除外">×</div>
+                          )}
+                        </div>
                       </div>
                       <div style={{ fontSize: 12, color: C.textMuted, marginTop: 6 }}>
-                        {p.prescriptions.map((rx) => rx.drugName).join("、")}
+                        {p.prescriptions.filter(rx => rx.isSanzai).map((rx) => rx.drugName).join("、") || p.prescriptions.map((rx) => rx.drugName).join("、")}
                       </div>
                     </button>
                   ))}
