@@ -437,7 +437,16 @@ const server = http.createServer(async (req, res) => {
   res.writeHead(404); res.end('{"error":"Not Found"}');
 });
 
-server.on("upgrade", (req, socket) => upgradeToWebSocket(req, socket));
+server.on("upgrade", (req, socket, head) => {
+  const pathname = url.parse(req.url).pathname;
+  console.log(`[WS] upgrade要求: ${pathname}`);
+  if (pathname === "/ws") {
+    upgradeToWebSocket(req, socket);
+    console.log(`[WS] 接続成功 (クライアント数: ${wsClients.size})`);
+  } else {
+    socket.destroy();
+  }
+});
 
 // ═══════════════════════════════════════════
 // 起動
