@@ -219,12 +219,19 @@ function checkForChanges() {
   const current = scanFiles();
   const newFiles = [], changedFiles = [];
   for (const [name, info] of Object.entries(current)) {
+    if (info.source === "cache") continue; // キャッシュファイルは変更検知対象外
     if (!knownFiles[name]) newFiles.push(name);
     else if (knownFiles[name].mtime !== info.mtime || knownFiles[name].size !== info.size) changedFiles.push(name);
   }
+  // 新規・変更ファイルをキャプチャ
+  for (const name of [...newFiles, ...changedFiles]) {
+    captureFile(name);
+  }
   if (newFiles.length > 0 || changedFiles.length > 0) {
-    knownFiles = current;
-    const fileList = Object.values(current).map(f => ({ name: f.name, size: f.size, modified: new Date(f.mtime).toISOString() }));
+    // キャプチャ後に再スキャン（キャッシュ含む）
+    const updatedFiles = scanFiles();
+    knownFiles = updatedFiles;
+    const fileList = Object.values(updatedFiles).map(f => ({ name: f.name, size: f.size, modified: new Date(f.mtime).toISOString() }));
     broadcastWs(JSON.stringify({ type: "files_updated", newFiles, changedFiles, files: fileList }));
     console.log(`[${new Date().toLocaleTimeString()}] 検出: 新規${newFiles.length}件, 変更${changedFiles.length}件`);
   }
