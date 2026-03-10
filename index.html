@@ -1009,16 +1009,16 @@ function App() {
         loadPendingSessions(cleanUrl);
 
         // 初回: キャッシュ済みNSIPSファイルを全て読み込み
-        (async () => {
+        const loadAllNsipsFiles = async () => {
           try {
-            const filesRes = await fetch(`${cleanUrl}/api/files`);
-            const filesData = await filesRes.json();
-            if (filesData.files && filesData.files.length > 0) {
+            const fr = await fetch(`${cleanUrl}/api/files`);
+            const fd = await fr.json();
+            if (fd.files && fd.files.length > 0) {
               const allPatients = [];
-              for (const f of filesData.files) {
+              for (const f of fd.files) {
                 try {
-                  const res = await fetch(`${cleanUrl}/api/file?name=${encodeURIComponent(f.name)}`);
-                  const buf = await res.arrayBuffer();
+                  const r = await fetch(`${cleanUrl}/api/file?name=${encodeURIComponent(f.name)}`);
+                  const buf = await r.arrayBuffer();
                   const decoder = new TextDecoder("shift_jis");
                   const text = decoder.decode(buf);
                   const result = parseGenericNSIPSCSV(text);
@@ -1029,16 +1029,38 @@ function App() {
                       else allPatients.push(np);
                     }
                   }
-                } catch (e) {}
+                } catch (e) { console.log("NSIPS parse error:", e); }
               }
               if (allPatients.length > 0) setNsipsPatients(allPatients);
+              return fd.files.length;
+            }
+          } catch (e) { console.log("NSIPS load error:", e); }
+          return 0;
+        };
+        
+        // 初回読み込み実行
+        const count = await loadAllNsipsFiles();
+        console.log(`NSIPS: ${count}件のファイルを読み込み`);
+
+        // HTTPポーリング（5秒間隔で新しいファイルを監視）
+        if (window._nsipsPollTimer) clearInterval(window._nsipsPollTimer);
+        let knownFileCount = count;
+        window._nsipsPollTimer = setInterval(async () => {
+          try {
+            const fr = await fetch(`${cleanUrl}/api/files`);
+            const fd = await fr.json();
+            if (fd.files && fd.files.length !== knownFileCount) {
+              knownFileCount = fd.files.length;
+              await loadAllNsipsFiles();
             }
           } catch (e) {}
-        })();
-        // WebSocket接続
-        const wsUrl = cleanUrl.replace(/^http/, "ws") + "/ws";
-        if (wsRef.current) { try { wsRef.current.close(); } catch (e) {} }
-        const ws = new WebSocket(wsUrl);
+        }, 5000);
+
+        // WebSocket接続（失敗してもHTTPポーリングで動く）
+        try {
+          const wsUrl = cleanUrl.replace(/^http/, "ws") + "/ws";
+          if (wsRef.current) { try { wsRef.current.close(); } catch (e) {} }
+          const ws = new WebSocket(wsUrl);
         ws.onmessage = (ev) => {
           try {
             const msg = JSON.parse(ev.data);
@@ -1074,9 +1096,12 @@ function App() {
             }
           } catch (e) {}
         };
-        ws.onclose = () => setServerStatus("disconnected");
-        ws.onerror = () => setServerStatus("error");
+        ws.onclose = () => {}; // WS切断でもHTTPポーリングがあるので接続状態を維持
+        ws.onerror = () => { console.log("WebSocket接続失敗 - HTTPポーリングで代替"); };
         wsRef.current = ws;
+        } catch (wsErr) {
+          console.log("WebSocket接続失敗:", wsErr, "- HTTPポーリングで代替します");
+        }
       }
     } catch (e) {
       setServerStatus("error");
