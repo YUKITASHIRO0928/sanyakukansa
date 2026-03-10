@@ -527,24 +527,32 @@ const playSound = (type) => {
 };
 
 // ═══════════════════════════════════════════
-// モックデータ
+// モックデータ（天秤テスト用）
 // ═══════════════════════════════════════════
 const MOCK_PATIENTS = [
   {
-    id: "P001", name: "田中 太郎", kana: "タナカ タロウ", age: 72, gender: "男",
-    prescriptionDate: "2026-03-09", doctor: "山田 一郎",
+    id: "P001", name: "山田 ゆうと", kana: "ヤマダ ユウト", age: 5, gender: "男",
+    prescriptionDate: "2026-03-10", doctor: "鈴木 健太",
     prescriptions: [
-      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 14, yjCode: "2171022F1025", drugName: "アムロジピンOD錠5mg", dosage: 5.0, unit: "mg", days: 14, totalMg: 70.0, totalG: 0.070 },
-      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 14, yjCode: "2149036F2025", drugName: "カルベジロール錠10mg", dosage: 10.0, unit: "mg", days: 14, totalMg: 140.0, totalG: 0.140 },
-      { rpNo: 2, rpUsage: "1日1回就寝前", rpDays: 28, yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 300.0, unit: "mg", days: 28, totalMg: 8400.0, totalG: 8.400 },
+      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 5, yjCode: "6132003B1037", drugName: "カルボシステインDS50%", dosage: 750.0, unit: "mg", days: 5, totalMg: 3750.0, totalG: 7.500 },
+      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 5, yjCode: "2233001X1196", drugName: "アスベリン散10%", dosage: 30.0, unit: "mg", days: 5, totalMg: 150.0, totalG: 1.500 },
+      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 5, yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 200.0, unit: "mg", days: 5, totalMg: 1000.0, totalG: 1.000 },
     ],
   },
   {
-    id: "P002", name: "佐藤 花子", kana: "サトウ ハナコ", age: 65, gender: "女",
-    prescriptionDate: "2026-03-09", doctor: "山田 一郎",
+    id: "P002", name: "佐藤 あおい", kana: "サトウ アオイ", age: 3, gender: "女",
+    prescriptionDate: "2026-03-10", doctor: "田中 美咲",
     prescriptions: [
-      { rpNo: 1, rpUsage: "1日1回朝食後", rpDays: 28, yjCode: "3332001F1074", drugName: "ワルファリンK錠1mg", dosage: 2.0, unit: "mg", days: 28, totalMg: 56.0, totalG: 0.056 },
-      { rpNo: 1, rpUsage: "1日1回朝食後", rpDays: 28, yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 500.0, unit: "mg", days: 28, totalMg: 14000.0, totalG: 14.000 },
+      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 7, yjCode: "6132003B1037", drugName: "ムコダインDS50%", dosage: 450.0, unit: "mg", days: 7, totalMg: 3150.0, totalG: 6.300 },
+      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 7, yjCode: "2233001X1196", drugName: "アスベリン散10%", dosage: 20.0, unit: "mg", days: 7, totalMg: 140.0, totalG: 1.400 },
+      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 7, yjCode: "7219002X1045", drugName: "乳糖（賦形剤）", dosage: 330.0, unit: "mg", days: 7, totalMg: 2310.0, totalG: 2.310 },
+    ],
+  },
+  {
+    id: "P003", name: "鈴木 はると", kana: "スズキ ハルト", age: 7, gender: "男",
+    prescriptionDate: "2026-03-10", doctor: "高橋 誠",
+    prescriptions: [
+      { rpNo: 1, rpUsage: "1日3回毎食後", rpDays: 5, yjCode: "4490028D1024", drugName: "アモキシシリン細粒10%", dosage: 400.0, unit: "mg", days: 5, totalMg: 2000.0, totalG: 20.000 },
     ],
   },
 ];
