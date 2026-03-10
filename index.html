@@ -465,19 +465,15 @@ function parseELIXIRFormat(text) {
     switch (recNo) {
       case 1: // 患者情報 or 保険情報
         {
-          // 患者情報は cols[2]=カナ, cols[3]=漢字名 のパターン
-          // 保険情報は cols[1]=1, cols[2]=数字, cols[3]=数字 のパターン
-          // 区別: cols[2]にカタカナが含まれるかどうか
           const field2 = (cols[2] || "").trim();
           const field3 = (cols[3] || "").trim();
           
-          // カタカナが含まれていれば患者情報
-          if (/[\u30A0-\u30FF]/.test(field2) && !patientRecordFound) {
+          // 最初のcase 1で、field3に漢字が含まれていれば患者情報
+          if (!patientRecordFound && field3 && /[\u4e00-\u9faf\u3040-\u309f]/.test(field3)) {
             patientRecordFound = true;
             patientKana = field2;
             patientName = field3;
             
-            // 性別と生年月日を探す
             for (let i = 4; i < Math.min(cols.length, 10); i++) {
               const val = (cols[i] || "").trim();
               if ((val === "1" || val === "2") && !patientGender) {
@@ -1084,7 +1080,8 @@ function App() {
   const patients = allPatients.filter(p => {
     if (dismissedPatients.includes(p.name)) return false;
     // NSIPSデータの場合は散剤を含む処方のみ
-    if (p.source === "NSIPS-ELIXIR") return p.hasSanzai;
+    // 散剤フィルタは一旦無効（全患者表示）
+    // if (p.source === "NSIPS-ELIXIR") return p.hasSanzai;
     return true; // モックデータはそのまま表示
   });
 
