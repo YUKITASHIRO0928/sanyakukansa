@@ -568,8 +568,8 @@ async function connectScale(onData, onStatus) {
     onStatus("connecting", "天秤を選択してください...");
     const port = await navigator.serial.requestPort();
     
-    // LB-600S2は4800bps設定
-    const baudOrder = [4800, 9600, 2400, 19200];
+    // LB-600S2 USB接続は19200bps
+    const baudOrder = [19200, 4800, 9600, 2400];
     let connected = false;
     
     for (const baud of baudOrder) {
