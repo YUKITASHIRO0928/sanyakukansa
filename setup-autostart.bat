@@ -5,6 +5,15 @@ echo   散薬監査システム 自動起動セットアップ
 echo =============================================
 echo.
 
+:: config.json チェック（なければ先に店舗設定へ）
+if not exist "%~dp0config.json" (
+  echo [注意] config.json が見つかりません。
+  echo 先に店舗情報を設定します。
+  echo.
+  call "%~dp0setup-store.bat"
+  exit /b
+)
+
 :: Node.js チェック
 node -v > nul 2>&1
 if %errorlevel% neq 0 (
