@@ -18,8 +18,23 @@ const fs = require("fs");
 const path = require("path");
 const url = require("url");
 const crypto = require("crypto");
+const os = require("os");
 
 const https = require("https");
+
+// LAN内IPアドレスを取得
+function getLanIPs() {
+  const ifaces = os.networkInterfaces();
+  const ips = [];
+  for (const name of Object.keys(ifaces)) {
+    for (const iface of ifaces[name]) {
+      if (iface.family === "IPv4" && !iface.internal) {
+        ips.push(iface.address);
+      }
+    }
+  }
+  return ips;
+}
 
 // ★★★ 設定（config.json から読み込み） ★★★
 const CONFIG_PATH = path.join(__dirname, "config.json");
@@ -487,7 +502,7 @@ server.on("upgrade", (req, socket, head) => {
 // ═══════════════════════════════════════════
 // 起動
 // ═══════════════════════════════════════════
-server.listen(PORT, async () => {
+server.listen(PORT, "0.0.0.0", async () => {
   // 起動時にGitHubから最新版を取得
   await autoUpdateFromGitHub();
 
@@ -497,8 +512,12 @@ server.listen(PORT, async () => {
   console.log("╔══════════════════════════════════════════════════╗");
   console.log("║   散薬調剤支援システム — サーバー v0.8              ║");
   console.log("╠══════════════════════════════════════════════════╣");
+  const lanIPs = getLanIPs();
   if (STORE_NAME) console.log(`║  店舗名:      ${STORE_NAME}`);
-  console.log(`║  アプリURL:    http://localhost:${PORT}`);
+  console.log(`║  このPC:       http://localhost:${PORT}`);
+  for (const ip of lanIPs) {
+    console.log(`║  LAN共有URL:   http://${ip}:${PORT}  ← 他端末はこちら`);
+  }
   console.log(`║  監視1(DATA):  ${WATCH_DIR} ${dirOk ? "✅" : "❌ 未検出"}`);
   console.log(`║  監視2(CZK):   ${WATCH_DIR2 || "未設定"} ${dir2Ok ? "✅" : WATCH_DIR2 ? "❌ 未検出" : ""}`);
   console.log(`║  履歴ファイル: ${HISTORY_FILE}`);
