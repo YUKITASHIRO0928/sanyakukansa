@@ -151,6 +151,41 @@ function saveHistory(records) {
   } catch (e) { console.error("履歴保存エラー:", e.message); }
 }
 
+// 日次バックアップ（毎日1回、dataフォルダ内にYYYYMMDD形式で保存）
+const BACKUP_DIR = path.join(DATA_DIR, "backups");
+function backupHistory() {
+  try {
+    if (!fs.existsSync(HISTORY_FILE)) return;
+    if (!fs.existsSync(BACKUP_DIR)) fs.mkdirSync(BACKUP_DIR, { recursive: true });
+    const today = new Date().toISOString().slice(0, 10).replace(/-/g, "");
+    const backupFile = path.join(BACKUP_DIR, `dispensing_history_${today}.json`);
+    // 当日分がまだなければコピー
+    if (!fs.existsSync(backupFile)) {
+      fs.copyFileSync(HISTORY_FILE, backupFile);
+      console.log(`📦 履歴バックアップ完了: ${backupFile}`);
+      // 30日以上前のバックアップを自動削除
+      const files = fs.readdirSync(BACKUP_DIR).filter(f => f.startsWith("dispensing_history_") && f.endsWith(".json"));
+      const cutoff = new Date();
+      cutoff.setDate(cutoff.getDate() - 30);
+      for (const f of files) {
+        const dateStr = f.replace("dispensing_history_", "").replace(".json", "");
+        const fileDate = new Date(`${dateStr.slice(0,4)}-${dateStr.slice(4,6)}-${dateStr.slice(6,8)}`);
+        if (fileDate < cutoff) {
+          fs.unlinkSync(path.join(BACKUP_DIR, f));
+          console.log(`🗑 古いバックアップ削除: ${f}`);
+        }
+      }
+    }
+  } catch (e) { console.error("バックアップエラー:", e.message); }
+}
+
+// 起動時 + 24時間ごとにバックアップ
+function startBackupSchedule() {
+  backupHistory();
+  setInterval(backupHistory, 24 * 60 * 60 * 1000);
+  console.log("📦 日次バックアップ: ON（data/backups/に30日分保存）");
+}
+
 let historyRecords = loadHistory();
 
 // ═══════════════════════════════════════════
@@ -533,4 +568,5 @@ server.listen(PORT, "0.0.0.0", async () => {
   startRealtimeWatch();
   setInterval(checkForChanges, POLL_INTERVAL);
   startGitHubPolling();
+  startBackupSchedule();
 });
