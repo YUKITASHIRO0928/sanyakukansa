@@ -73,6 +73,7 @@ const GTINMAP_FILE = path.join(DATA_DIR, "gtin_map.json");
 // リポジトリ作成後、ここを書き換えてください
 // 例: https://raw.githubusercontent.com/yourname/dispensing-app/main/index.html
 const GITHUB_INDEX_URL = "https://raw.githubusercontent.com/YUKITASHIRO0928/sanyakukansa/main/index.html";
+const GITHUB_SERVER_URL = "https://raw.githubusercontent.com/YUKITASHIRO0928/sanyakukansa/main/server.js";
 const AUTO_UPDATE = true;      // false にすると自動更新を無効化
 
 // dataフォルダ作成
@@ -123,12 +124,34 @@ async function autoUpdateFromGitHub() {
   }
 }
 
+// server.js 自身の自動更新（更新があれば上書き保存 → pm2が自動再起動）
+async function autoUpdateServerJs() {
+  if (!AUTO_UPDATE || !GITHUB_SERVER_URL) return;
+  try {
+    const remoteCode = await fetchFromGitHub(GITHUB_SERVER_URL);
+    const localPath = path.join(__dirname, "server.js");
+    const localCode = fs.existsSync(localPath) ? fs.readFileSync(localPath, "utf-8") : "";
+    if (remoteCode !== localCode) {
+      // バックアップ
+      const backupPath = path.join(DATA_DIR, `server_backup_${Date.now()}.js`);
+      fs.writeFileSync(backupPath, localCode, "utf-8");
+      fs.writeFileSync(localPath, remoteCode, "utf-8");
+      console.log("✅ server.js を最新版に更新しました！pm2が自動再起動します...");
+      // pm2環境では自動再起動される（watch不要）
+      setTimeout(() => process.exit(0), 1000);
+    }
+  } catch (e) {
+    console.log(`⚠ server.js 更新スキップ（${e.message}）`);
+  }
+}
+
 // 定期的にGitHubをチェック（5分ごと）
 const GITHUB_CHECK_INTERVAL = 5 * 60 * 1000;
 function startGitHubPolling() {
   if (!AUTO_UPDATE || !GITHUB_INDEX_URL) return;
   setInterval(async () => {
     await autoUpdateFromGitHub();
+    await autoUpdateServerJs();
   }, GITHUB_CHECK_INTERVAL);
   console.log(`🔄 GitHub自動更新: ${GITHUB_CHECK_INTERVAL / 60000}分ごとにチェック`);
 }
