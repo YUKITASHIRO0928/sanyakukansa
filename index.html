@@ -1002,6 +1002,12 @@ function App() {
         ws.onmessage = (ev) => {
           try {
             const msg = JSON.parse(ev.data);
+            // アプリ更新通知 → 3秒後に自動リロード
+            if (msg.type === "app_updated") {
+              console.log("🔄 アプリが更新されました。リロードします...");
+              setTimeout(() => window.location.reload(), 3000);
+              return;
+            }
             if (msg.type === "files_updated") {
               setServerFiles(msg.files || []);
               // 新規ファイルまたは変更ファイルがあれば自動読み込み

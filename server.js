@@ -21,11 +21,35 @@ const crypto = require("crypto");
 
 const https = require("https");
 
-// ★★★ 設定 ★★★
-const WATCH_DIR = "\\\\ELIXIR1\\Senddata\\SIPS3\\DATA";          // NSIPS共有フォルダ（SIPS3 = ファイルが残る）
-const WATCH_DIR2 = "\\\\ELIXIR1\\Senddata\\SIPS1\\JAHISCZK";    // JAHISCZK（バックアップ）
-const PORT = 3456;                       // サーバーポート
-const POLL_INTERVAL = 300;               // フォルダ監視間隔(ms) - 高速ポーリング
+// ★★★ 設定（config.json から読み込み） ★★★
+const CONFIG_PATH = path.join(__dirname, "config.json");
+const DEFAULT_CONFIG = {
+  storeName: "",
+  watchDir: "\\\\ELIXIR1\\Senddata\\SIPS3\\DATA",
+  watchDir2: "\\\\ELIXIR1\\Senddata\\SIPS1\\JAHISCZK",
+  port: 3456,
+  pollInterval: 300,
+};
+
+let userConfig = {};
+if (fs.existsSync(CONFIG_PATH)) {
+  try {
+    userConfig = JSON.parse(fs.readFileSync(CONFIG_PATH, "utf-8"));
+    console.log("✅ config.json を読み込みました");
+  } catch (e) {
+    console.error("⚠ config.json の読み込みに失敗:", e.message);
+  }
+} else {
+  console.log("ℹ config.json が見つかりません — デフォルト設定で起動します");
+  console.log("  config.example.json をコピーして config.json を作成してください");
+}
+
+const CONFIG = { ...DEFAULT_CONFIG, ...userConfig };
+const STORE_NAME = CONFIG.storeName;
+const WATCH_DIR = CONFIG.watchDir;
+const WATCH_DIR2 = CONFIG.watchDir2;
+const PORT = CONFIG.port;
+const POLL_INTERVAL = CONFIG.pollInterval;
 const DATA_DIR = path.join(__dirname, "data"); // 履歴等の保存先
 const HISTORY_FILE = path.join(DATA_DIR, "dispensing_history.json");
 const GTINMAP_FILE = path.join(DATA_DIR, "gtin_map.json");
@@ -73,13 +97,25 @@ async function autoUpdateFromGitHub() {
         fs.writeFileSync(backupPath, localHtml, "utf-8");
       }
       fs.writeFileSync(localPath, remoteHtml, "utf-8");
-      console.log("✅ index.html を最新版に更新しました！");
+      console.log("✅ index.html を最新版に更新しました！ブラウザに通知します...");
+      // 接続中の全ブラウザに更新を通知 → 自動リロード
+      broadcastWs(JSON.stringify({ type: "app_updated", message: "アプリが更新されました。リロードします..." }));
     } else {
       console.log("✅ index.html は最新です");
     }
   } catch (e) {
     console.log(`⚠ 自動更新スキップ（${e.message}）— ローカルのindex.htmlを使用します`);
   }
+}
+
+// 定期的にGitHubをチェック（5分ごと）
+const GITHUB_CHECK_INTERVAL = 5 * 60 * 1000;
+function startGitHubPolling() {
+  if (!AUTO_UPDATE || !GITHUB_INDEX_URL) return;
+  setInterval(async () => {
+    await autoUpdateFromGitHub();
+  }, GITHUB_CHECK_INTERVAL);
+  console.log(`🔄 GitHub自動更新: ${GITHUB_CHECK_INTERVAL / 60000}分ごとにチェック`);
 }
 
 // ═══════════════════════════════════════════
@@ -287,7 +323,7 @@ const server = http.createServer(async (req, res) => {
   if (pathname === "/api/status") {
     res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
     res.end(JSON.stringify({
-      status: "running", watchDir: WATCH_DIR,
+      status: "running", storeName: STORE_NAME, watchDir: WATCH_DIR,
       dirExists: fs.existsSync(WATCH_DIR),
       fileCount: Object.keys(knownFiles).length,
       historyCount: historyRecords.length,
@@ -461,6 +497,7 @@ server.listen(PORT, async () => {
   console.log("╔══════════════════════════════════════════════════╗");
   console.log("║   散薬調剤支援システム — サーバー v0.8              ║");
   console.log("╠══════════════════════════════════════════════════╣");
+  if (STORE_NAME) console.log(`║  店舗名:      ${STORE_NAME}`);
   console.log(`║  アプリURL:    http://localhost:${PORT}`);
   console.log(`║  監視1(DATA):  ${WATCH_DIR} ${dirOk ? "✅" : "❌ 未検出"}`);
   console.log(`║  監視2(CZK):   ${WATCH_DIR2 || "未設定"} ${dir2Ok ? "✅" : WATCH_DIR2 ? "❌ 未検出" : ""}`);
@@ -476,4 +513,5 @@ server.listen(PORT, async () => {
   console.log(`初回スキャン: ${Object.keys(knownFiles).length}件のCSVを検出\n`);
   startRealtimeWatch();
   setInterval(checkForChanges, POLL_INTERVAL);
+  startGitHubPolling();
 });
