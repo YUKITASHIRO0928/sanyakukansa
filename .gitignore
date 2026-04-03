@@ -1,0 +1,4 @@
+config.json
+data/
+.claude/
+node_modules/

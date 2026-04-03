@@ -68,6 +68,35 @@ const POLL_INTERVAL = CONFIG.pollInterval;
 const DATA_DIR = path.join(__dirname, "data"); // 履歴等の保存先
 const HISTORY_FILE = path.join(DATA_DIR, "dispensing_history.json");
 const GTINMAP_FILE = path.join(DATA_DIR, "gtin_map.json");
+const HOT_MASTER_FILE = path.join(DATA_DIR, "hot_master.json");
+
+// HOTマスター読み込み
+let hotMaster = {};
+function loadHotMaster() {
+  try {
+    if (fs.existsSync(HOT_MASTER_FILE)) {
+      hotMaster = JSON.parse(fs.readFileSync(HOT_MASTER_FILE, "utf-8"));
+      console.log(`✅ HOTマスター読み込み: ${Object.keys(hotMaster).length.toLocaleString()}件`);
+    } else {
+      console.log("ℹ HOTマスター未検出 — tools/import-hot-master.js を実行してください");
+    }
+  } catch (e) { console.error("HOTマスター読込エラー:", e.message); }
+}
+loadHotMaster();
+
+// GTIN → HOTマスター検索（GTIN-14対応）
+function lookupHotMaster(gtin) {
+  if (!gtin) return null;
+  const g = String(gtin).replace(/\D/g, "");
+  // GTIN-13 として直接検索
+  if (g.length === 13 && hotMaster[g]) return hotMaster[g];
+  // GTIN-14 → 先頭1桁を除いてGTIN-13へ変換
+  if (g.length === 14) {
+    const gtin13 = g.substring(1);
+    if (hotMaster[gtin13]) return hotMaster[gtin13];
+  }
+  return null;
+}
 
 // ★★★ GitHub自動更新 ★★★
 // リポジトリ作成後、ここを書き換えてください
@@ -483,6 +512,38 @@ const server = http.createServer(async (req, res) => {
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ ok: true, count: Object.keys(map).length }));
       console.log(`[${new Date().toLocaleTimeString()}] GTIN紐付け保存: ${Object.keys(map).length}件`);
+    } catch (e) {
+      res.writeHead(400); res.end(JSON.stringify({ error: e.message }));
+    }
+    return;
+  }
+
+  // ── API: HOTマスター検索 ──
+  if (pathname === "/api/hotmaster" && req.method === "GET") {
+    const gtin = parsed.query.gtin;
+    const result = lookupHotMaster(gtin);
+    res.writeHead(200, { "Content-Type": "application/json; charset=utf-8" });
+    if (result) {
+      res.end(JSON.stringify({ found: true, gtin, ...result }));
+    } else {
+      res.end(JSON.stringify({ found: false, gtin }));
+    }
+    return;
+  }
+
+  // ── API: GTIN未登録薬品を処方内容と紐付けて登録 ──
+  if (pathname === "/api/gtinmap/register" && req.method === "POST") {
+    try {
+      const body = JSON.parse(await readBody(req));
+      const { gtin, name, spec, yj, category, maker } = body;
+      if (!gtin || !name) { res.writeHead(400); res.end(JSON.stringify({ error: "gtin・nameは必須" })); return; }
+      let map = {};
+      try { if (fs.existsSync(GTINMAP_FILE)) map = JSON.parse(fs.readFileSync(GTINMAP_FILE, "utf-8")); } catch (e) {}
+      map[gtin] = { name, spec: spec || "", yj: yj || "", category: category || "", maker: maker || "", registeredAt: new Date().toISOString() };
+      fs.writeFileSync(GTINMAP_FILE, JSON.stringify(map, null, 2), "utf-8");
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ ok: true, gtin, name }));
+      console.log(`[${new Date().toLocaleTimeString()}] GTIN登録: ${gtin} → ${name}`);
     } catch (e) {
       res.writeHead(400); res.end(JSON.stringify({ error: e.message }));
     }

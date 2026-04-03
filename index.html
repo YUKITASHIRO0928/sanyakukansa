@@ -1128,6 +1128,17 @@ function App() {
   const [gtinMap, setGtinMap] = useState({}); // { "04987123456789": { receiptCode: "612340071", drugName: "アムロジピン...", registeredAt: "..." } }
   const [showGtinRegister, setShowGtinRegister] = useState(false);
   const [pendingGtin, setPendingGtin] = useState(null); // 未登録GTINの一時保持
+  const [pendingHotInfo, setPendingHotInfo] = useState(null); // HOTマスター検索結果（未登録時）
+
+  // HOTマスターAPIで検索
+  const lookupHotMasterAPI = useCallback(async (gtin) => {
+    if (serverStatus !== "connected") return null;
+    try {
+      const cleanUrl = serverUrl.replace(/\/+$/, "");
+      const res = await fetch(`${cleanUrl}/api/hotmaster?gtin=${encodeURIComponent(gtin)}`);
+      return await res.json();
+    } catch (e) { return null; }
+  }, [serverStatus, serverUrl]);
 
   // サーバーからGTIN紐付けテーブル読込
   const loadGtinMap = useCallback(async (baseUrl) => {
@@ -1264,9 +1275,37 @@ function App() {
         setTimeout(() => barcodeRef.current?.focus(), 100);
       }
     } else {
-      // 未登録GTIN → 登録ダイアログ表示
-      playSound("confirm");
+      // 未登録GTIN → まずHOTマスターで検索
       setPendingGtin(gtin);
+      const hotResult = await lookupHotMasterAPI(gtin);
+      if (hotResult && hotResult.found) {
+        // HOTマスターで見つかった → YJコード・薬品名で処方薬と自動マッチング
+        const autoMatchIdx = selectedPatient.prescriptions.findIndex((rx, i) => {
+          if (confirmedNames.includes(rx.drugName)) return false;
+          return (hotResult.yj && hotResult.yj === rx.yjCode) ||
+                 (hotResult.name && rx.drugName.includes(hotResult.name.replace(/（.*?）/g, "").trim()));
+        });
+        if (autoMatchIdx >= 0) {
+          // 自動マッチング成功 → gtinMapに保存してそのまま秤量開始
+          const matchedRx = selectedPatient.prescriptions[autoMatchIdx];
+          await saveGtinMapping(gtin, {
+            drugName: matchedRx.drugName,
+            receiptCode: matchedRx.receiptCode || matchedRx.code || "",
+            yjCode: hotResult.yj || "",
+          });
+          playSound("confirm");
+          setCurrentDrugIndex(autoMatchIdx);
+          setStep(STEPS.WEIGHING);
+          setTimeout(() => scaleRef.current?.focus(), 100);
+          return;
+        }
+        // HOTマスターにあるが処方薬と自動一致せず → ダイアログでHOT情報を提示
+        setPendingHotInfo(hotResult);
+      } else {
+        // HOTマスターにも未掲載 → ダイアログ（手動登録）
+        setPendingHotInfo(null);
+      }
+      playSound("confirm");
       setShowGtinRegister(true);
     }
   };
@@ -1281,6 +1320,7 @@ function App() {
     });
     setShowGtinRegister(false);
     setPendingGtin(null);
+    setPendingHotInfo(null);
 
     // 登録した薬が未秤量なら、そのまま秤量開始
     const confirmedNames = confirmedDrugs.map(d => d.drugName);
@@ -2052,11 +2092,27 @@ function App() {
                     borderRadius: 14, padding: 20, textAlign: "left",
                   }}>
                     <div style={{ fontSize: 16, fontWeight: 700, color: "#92400e", marginBottom: 4 }}>
-                      📋 初回登録：この容器はどの薬ですか？
+                      {pendingHotInfo ? "📋 HOTマスター照合済み：処方薬と紐付けてください" : "📋 未掲載の薬品：処方薬と紐付けて登録"}
                     </div>
-                    <div style={{ fontSize: 12, color: "#92400e", marginBottom: 14 }}>
-                      GTIN: <span style={{ fontFamily: "monospace" }}>{pendingGtin}</span> — まだ登録されていません。下から選んでください。
+                    <div style={{ fontSize: 12, color: "#92400e", marginBottom: pendingHotInfo ? 8 : 14 }}>
+                      GTIN: <span style={{ fontFamily: "monospace" }}>{pendingGtin}</span>
+                      {pendingHotInfo ? "" : " — HOTマスターにも未掲載です。下の処方薬から選ぶと登録できます。"}
                     </div>
+
+                    {/* HOTマスター情報がある場合はバッジ表示 */}
+                    {pendingHotInfo && (
+                      <div style={{ background: "#fff", border: `1px solid #fbbf24`, borderRadius: 10, padding: "10px 14px", marginBottom: 14, fontSize: 13 }}>
+                        <div style={{ fontWeight: 700, color: C.text, marginBottom: 2 }}>{pendingHotInfo.name}</div>
+                        <div style={{ color: C.textSub, fontSize: 12 }}>
+                          {pendingHotInfo.spec && <span style={{ marginRight: 10 }}>規格: {pendingHotInfo.spec}</span>}
+                          {pendingHotInfo.yj && <span style={{ marginRight: 10 }}>YJ: {pendingHotInfo.yj}</span>}
+                          {pendingHotInfo.category && <span>区分: {pendingHotInfo.category}</span>}
+                        </div>
+                        <div style={{ color: "#92400e", fontSize: 11, marginTop: 4 }}>
+                          ※ 処方薬と一致しませんでした。下から手動で紐付けてください。
+                        </div>
+                      </div>
+                    )}
 
                     {selectedPatient && (
                       <div>
@@ -2085,7 +2141,7 @@ function App() {
                       </div>
                     )}
 
-                    <button onClick={() => { setShowGtinRegister(false); setPendingGtin(null); setBarcodeInput(""); }} style={{
+                    <button onClick={() => { setShowGtinRegister(false); setPendingGtin(null); setPendingHotInfo(null); setBarcodeInput(""); }} style={{
                       marginTop: 12, padding: "8px 20px", fontSize: 13, background: C.bg,
                       border: `1px solid ${C.border}`, borderRadius: 8, cursor: "pointer", color: C.textSub,
                     }}>キャンセル</button>
