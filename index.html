@@ -1222,7 +1222,7 @@ function App() {
   };
 
   // バーコードスキャン → GS-1パース → 処方内の未秤量薬を検索
-  const handleBarcodeScan = () => {
+  const handleBarcodeScan = async () => {
     setErrorMsg("");
     setLastScanResult(null);
     setShowGtinRegister(false);
