@@ -62,6 +62,11 @@ echo pm2 resurrect >> "%~dp0start-silent.bat"
 
 echo [OK] スタートアップ登録完了
 
+:: 自動更新設定
+echo.
+echo [4/4] 自動更新（タスクスケジューラ）を設定中...
+call "%~dp0setup-auto-update.bat"
+
 echo.
 echo =============================================
 echo   セットアップ完了！
