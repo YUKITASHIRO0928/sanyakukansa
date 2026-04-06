@@ -1,40 +1,5 @@
-<!DOCTYPE html>
-<html lang="ja">
-<head>
-<meta charset="utf-8">
-<meta name="viewport" content="width=device-width, initial-scale=1">
-<title>散薬調剤支援システム</title>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react/18.2.0/umd/react.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/react-dom/18.2.0/umd/react-dom.production.min.js"></script>
-<script src="https://cdnjs.cloudflare.com/ajax/libs/babel-standalone/7.23.9/babel.min.js"></script>
-<style>
-@import url('https://fonts.googleapis.com/css2?family=Noto+Sans+JP:wght@400;500;600;700&display=swap');
-* { box-sizing: border-box; margin: 0; padding: 0; }
-input::-webkit-outer-spin-button, input::-webkit-inner-spin-button { -webkit-appearance: none; margin: 0; }
-input[type=number] { -moz-appearance: textfield; }
-@keyframes shake { 0%, 100% { transform: translateX(0); } 20% { transform: translateX(-8px); } 40% { transform: translateX(8px); } 60% { transform: translateX(-4px); } 80% { transform: translateX(4px); } }
-</style>
-</head>
-<body>
-<div id="root"></div>
 <script type="text/babel">
-  // グローバルエラーキャッチ用
-  window.addEventListener('error', function(e) {
-    console.error("GLOBAL ERROR:", e.error);
-    const errDiv = document.createElement('div');
-    errDiv.style = "color: red; padding: 20px; font-family: monospace; background: #fee;";
-    errDiv.innerHTML = `<h3>React Rendering Error</h3><pre>${e.error ? e.error.stack : e.message}</pre>`;
-    document.body.prepend(errDiv);
-  });
-  window.addEventListener('unhandledrejection', function(e) {
-    console.error("UNHANDLED PROMISE:", e.reason);
-    const errDiv = document.createElement('div');
-    errDiv.style = "color: red; padding: 20px; font-family: monospace; background: #fee;";
-    errDiv.innerHTML = `<h3>Unhandled Promise</h3><pre>${e.reason ? e.reason.stack : e.reason}</pre>`;
-    document.body.prepend(errDiv);
-  });
-
-  const { useState, useEffect, useRef, useCallback, useMemo } = React;
+const { useState, useEffect, useRef, useCallback } = React;
 
 // ═══════════════════════════════════════════
 // GS-1 バーコードパーサー
@@ -791,29 +756,6 @@ const MOCK_PATIENTS = [
   },
 ];
 
-const past3DaysStr = new (function(){ const d = new Date(); d.setDate(d.getDate() - 3); return d; })().toISOString().split("T")[0];
-
-const MOCK_HISTORY = [
-  {
-    id: "H1",
-    patient: { name: "モック 花子", age: 45, gender: "女", kana: "モック ハナコ" },
-    drugs: [{ drugName: "カロナール細粒20%", lot: "PX999", expiry: "2026/08", targetWeight: 1.500 }],
-    completedAt: yesterdayStr + "T14:15:00.000Z",
-    operator: "テスト薬剤師"
-  },
-  {
-    id: "H2",
-    patient: { name: "山田 ゆうと", age: 5, gender: "男", kana: "ヤマダ ユウト" },
-    drugs: [
-      { drugName: "カルボシステインDS50%", lot: "CD456", expiry: "2028/01", targetWeight: 7.500 },
-      { drugName: "アスベリン散10%", lot: "AB123", expiry: "2027/12", targetWeight: 1.500 },
-      { drugName: "乳糖（賦形剤）", lot: "LT888", expiry: "2026/10", targetWeight: 1.000 }
-    ],
-    completedAt: past3DaysStr + "T10:30:00.000Z",
-    operator: "鈴木 健太"
-  }
-];
-
 // ═══════════════════════════════════════════
 // 電子天秤 Web Serial API 接続
 // ═══════════════════════════════════════════
@@ -1181,35 +1123,13 @@ function App() {
 
   // タブ別のリスト生成
   // 未調剤: 全患者データのうち、保留中(pendingSessions)でも、完了(history)でもないもの
-  const safePending = pendingSessions || [];
-  const safeHistory = history || [];
-  const safeAllPatients = allPatients || [];
-
-  const pendingIds = safePending.map(s => s.patient?.id || s.patient?.name);
-  const doneIds = safeHistory.map(h => h.patient?.id || h.patient?.name);
-  const rawInbox = safeAllPatients.filter(p => !pendingIds.includes(p.id) && !doneIds.includes(p.id));
+  const pendingIds = pendingSessions.map(s => s.patient?.id || s.patient?.name);
+  const doneIds = history.map(h => h.patient?.id || h.patient?.name);
+  const rawInbox = allPatients.filter(p => !pendingIds.includes(p.id) && !doneIds.includes(p.id));
   
   const inboxList = getFilteredList(rawInbox, false);
-  const pendingList = getFilteredList(safePending, false);
-  const doneList = getFilteredList(safeHistory, true);
-
-  // 過去の履歴モーダルステート
-  const [showHistoryModal, setShowHistoryModal] = useState(false);
-  const [historySearchDate, setHistorySearchDate] = useState(todayStr); // YYYY-MM-DD
-  const [selectedHistoryRecord, setSelectedHistoryRecord] = useState(null);
-
-  // 履歴検索結果
-  const historySearchResults = useMemo(() => {
-    let result = safeHistory;
-    if (historySearchDate) {
-      result = result.filter(h => {
-        if (!h.completedAt) return false;
-        return h.completedAt.startsWith(historySearchDate);
-      });
-    }
-    // 最近のもの順
-    return result.sort((a, b) => new Date(b.completedAt) - new Date(a.completedAt));
-  }, [safeHistory, historySearchDate]);
+  const pendingList = getFilteredList(pendingSessions, false);
+  const doneList = getFilteredList(history, true);
 
   // 調剤ステート
   const [step, setStep] = useState(STEPS.SELECT_PATIENT);
@@ -1880,7 +1800,86 @@ function App() {
               </div>
             )}
 
-            {/* (処方データ接続・アップロードUIは自動化されたため非表示化) */}
+            {/* NSIPS処方データ読込UI */}
+            {step === STEPS.SELECT_PATIENT && (
+              <div style={{ ...cardStyle, padding: "18px 20px", marginBottom: 16 }}>
+                <div style={{ fontSize: 14, fontWeight: 600, color: C.text, marginBottom: 10 }}>📋 処方データ取込</div>
+
+                {/* サーバー接続 */}
+                <div style={{ display: "flex", alignItems: "center", gap: 8, marginBottom: 10, flexWrap: "wrap" }}>
+                  <input
+                    value={serverUrl}
+                    onChange={(e) => setServerUrl(e.target.value)}
+                    placeholder="http://localhost:3456"
+                    style={{ padding: "7px 12px", fontSize: 13, border: `1px solid ${C.border}`, borderRadius: 8, width: 260, outline: "none", fontFamily: "monospace" }}
+                  />
+                  <button onClick={() => connectToServer(serverUrl)} style={{
+                    padding: "7px 16px", fontSize: 13, fontWeight: 600, borderRadius: 8, cursor: "pointer", border: "none",
+                    background: serverStatus === "connected" ? C.successLight : C.primary,
+                    color: serverStatus === "connected" ? C.success : "#fff",
+                  }}>
+                    {serverStatus === "connecting" ? "接続中..." : serverStatus === "connected" ? "✅ 接続済" : "🔌 サーバー接続"}
+                  </button>
+                  {serverStatus === "error" && <span style={{ fontSize: 12, color: C.danger }}>❌ 接続失敗 — サーバーが起動しているか確認してください</span>}
+                </div>
+
+                {/* サーバー接続時: ファイル一覧 */}
+                {serverStatus === "connected" && serverFiles.length > 0 && (
+                  <div style={{ marginBottom: 10 }}>
+                    <div style={{ fontSize: 12, color: C.textSub, marginBottom: 6 }}>NSIPSフォルダ内のファイル（クリックで読込）:</div>
+                    <div style={{ display: "flex", flexWrap: "wrap", gap: 6 }}>
+                      {serverFiles.map((f) => (
+                        <button key={f.name} onClick={() => loadServerFile(f.name)} style={{
+                          padding: "6px 14px", fontSize: 12, borderRadius: 8, cursor: "pointer",
+                          border: `1px solid ${selectedServerFile === f.name ? C.primary : C.border}`,
+                          background: selectedServerFile === f.name ? C.primaryLight : C.bg,
+                          color: selectedServerFile === f.name ? C.primary : C.text,
+                          fontWeight: selectedServerFile === f.name ? 600 : 400,
+                        }}>
+                          📄 {f.name}
+                          <span style={{ fontSize: 10, color: C.textMuted, marginLeft: 6 }}>
+                            {(f.size / 1024).toFixed(1)}KB
+                          </span>
+                        </button>
+                      ))}
+                    </div>
+                  </div>
+                )}
+                {serverStatus === "connected" && serverFiles.length === 0 && (
+                  <div style={{ fontSize: 12, color: C.textMuted, marginBottom: 10 }}>
+                    NSIPSフォルダにCSVファイルがありません。レセコンで処方入力するとファイルが自動検出されます。
+                  </div>
+                )}
+
+                {/* 区切り線 */}
+                <div style={{ borderTop: `1px solid ${C.border}`, margin: "10px 0", paddingTop: 10 }}>
+                  <div style={{ display: "flex", alignItems: "center", justifyContent: "space-between", flexWrap: "wrap", gap: 8 }}>
+                    <div style={{ fontSize: 12, color: C.textSub }}>
+                      {nsipsLoadInfo
+                        ? <span style={{ color: C.success, fontWeight: 600 }}>✅ {nsipsLoadInfo.filename} — {nsipsLoadInfo.patientCount}名 {nsipsLoadInfo.totalRx}剤</span>
+                        : "または手動でCSVファイルをアップロード"
+                      }
+                    </div>
+                    <div style={{ display: "flex", gap: 8 }}>
+                      <label style={{
+                        display: "inline-flex", alignItems: "center", gap: 6,
+                        background: C.bg, color: C.textSub, padding: "6px 14px",
+                        borderRadius: 8, cursor: "pointer", fontSize: 12, border: `1px solid ${C.border}`,
+                      }}>
+                        📂 手動アップロード
+                        <input type="file" accept=".csv,.tsv,.txt" onChange={handleNSIPSFile} style={{ display: "none" }} />
+                      </label>
+                      {nsipsPatients.length > 0 && (
+                        <button onClick={() => { setNsipsPatients([]); setNsipsLoadInfo(null); setSelectedServerFile(null); }} style={{
+                          background: C.bg, border: `1px solid ${C.border}`, borderRadius: 8,
+                          color: C.textSub, padding: "6px 14px", cursor: "pointer", fontSize: 12,
+                        }}>モックに戻す</button>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              </div>
+            )}
 
             {/* STEP 0: 患者ダッシュボード */}
             {step === STEPS.SELECT_PATIENT && (
@@ -1892,11 +1891,8 @@ function App() {
                   </div>
 
                   {/* 検索・日付フィルター */}
-                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap", alignItems: "center" }}>
-                    <button onClick={() => setShowHistoryModal(true)} style={{ padding: "8px 14px", borderRadius: 8, border: `1px solid ${C.border}`, fontSize: 13, background: "#fff", cursor: "pointer", fontWeight: 700, display: "flex", alignItems: "center", gap: 6, color: C.textSub, transition: "all 0.15s" }} onMouseEnter={(e)=>e.currentTarget.style.borderColor=C.primary} onMouseLeave={(e)=>e.currentTarget.style.borderColor=C.border}>
-                      📆 過去の履歴を検索
-                    </button>
-                    <input type="text" placeholder="🔍 患者名やフリガナで検索" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 13, minWidth: 200, outline: "none", background: "#fff" }} />
+                  <div style={{ display: "flex", gap: 8, flexWrap: "wrap" }}>
+                    <input type="text" placeholder="🔍 患者名やフリガナで検索" value={searchQuery} onChange={(e) => setSearchQuery(e.target.value)} style={{ padding: "8px 12px", borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 13, minWidth: 220, outline: "none", background: "#fff" }} />
                     <select value={dateFilter} onChange={(e) => setDateFilter(e.target.value)} style={{ padding: "8px 10px", borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 13, outline: "none", cursor: "pointer", background: "#fff" }}>
                       <option value="today">📅 今日の処方</option>
                       <option value="past3">📅 直近3日</option>
@@ -1927,7 +1923,7 @@ function App() {
 
                   {/* 未調剤タブ */}
                   {dashboardTab === "inbox" && inboxList.map((p) => {
-                    const rxCount = (p.prescriptions || []).filter(rx => rx.isSanzai).length || (p.prescriptions || []).length;
+                    const rxCount = p.prescriptions.filter(rx => rx.isSanzai).length || p.prescriptions.length;
                     return (
                       <button key={p.id} onClick={() => selectPatient(p)} style={{ ...cardStyle, padding: "16px 20px", cursor: "pointer", textAlign: "left", position: "relative", transition: "all 0.15s" }} onMouseEnter={(e) => { e.currentTarget.style.borderColor = C.primary; e.currentTarget.style.boxShadow = "0 4px 12px rgba(59,130,246,0.1)"; }} onMouseLeave={(e) => { e.currentTarget.style.borderColor = C.border; e.currentTarget.style.boxShadow = "0 1px 4px rgba(0,0,0,0.04)"; }}>
                         <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
@@ -1945,37 +1941,33 @@ function App() {
                           </div>
                         </div>
                         <div style={{ fontSize: 11, color: C.textMuted, background: "#f8fafc", padding: "8px 10px", borderRadius: 8, lineHeight: 1.4 }}>
-                          処方情報: <br/>{(p.prescriptions || []).filter(rx => rx.isSanzai).map(rx => rx.drugName).join("、") || (p.prescriptions || []).map(rx => rx.drugName).join("、")}
+                          処方情報: <br/>{p.prescriptions.filter(rx => rx.isSanzai).map(rx => rx.drugName).join("、") || p.prescriptions.map(rx => rx.drugName).join("、")}
                         </div>
                       </button>
                     );
                   })}
 
                   {/* 保留中タブ */}
-                  {dashboardTab === "pending" && pendingList.map((s) => {
-                    const confirmed = s.confirmedDrugs || [];
-                    const tRx = s.totalPrescriptions || 1;
-                    return (
+                  {dashboardTab === "pending" && pendingList.map((s) => (
                     <button key={s.id} onClick={() => resumeSession(s)} style={{ ...cardStyle, padding: "16px 20px", cursor: "pointer", textAlign: "left", borderColor: "#fbbf24", background: "#fffbeb", position: "relative", transition: "all 0.15s" }} onMouseEnter={(e) => { e.currentTarget.style.boxShadow = "0 4px 12px rgba(245,158,11,0.1)"; }} onMouseLeave={(e) => { e.currentTarget.style.boxShadow = "none"; }}>
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 8 }}>
                         <div>
-                          <div style={{ fontSize: 16, fontWeight: 700, color: "#9a3412" }}>⏸ {s.patient?.name || "不明"}</div>
-                          <div style={{ fontSize: 12, color: "#b45309", marginTop: 4 }}>{s.patient?.age}歳 {s.patient?.gender}</div>
+                          <div style={{ fontSize: 16, fontWeight: 700, color: "#9a3412" }}>⏸ {s.patient.name}</div>
+                          <div style={{ fontSize: 12, color: "#b45309", marginTop: 4 }}>{s.patient.age}歳 {s.patient.gender}</div>
                         </div>
-                        <div style={{ background: "#fef3c7", borderRadius: 20, padding: "4px 10px", fontSize: 12, color: "#b45309", fontWeight: 700 }}>残り {tRx - confirmed.length}剤</div>
+                        <div style={{ background: "#fef3c7", borderRadius: 20, padding: "4px 10px", fontSize: 12, color: "#b45309", fontWeight: 700 }}>残り {s.totalPrescriptions - s.confirmedDrugs.length}剤</div>
                       </div>
                       <div style={{ fontSize: 12, color: "#9a3412", fontWeight: 600, marginBottom: 4, marginTop: 10 }}>
-                        進行状況: {confirmed.length} / {tRx} 完了
+                        進行状況: {s.confirmedDrugs.length} / {s.totalPrescriptions} 完了
                       </div>
                       <div style={{ background: "#fde68a", height: 6, borderRadius: 4, overflow: "hidden", marginBottom: 10 }}>
-                        <div style={{ background: "#d97706", height: "100%", width: `${(confirmed.length / tRx) * 100}%` }} />
+                        <div style={{ background: "#d97706", height: "100%", width: `${(s.confirmedDrugs.length / s.totalPrescriptions) * 100}%` }} />
                       </div>
                       <div style={{ fontSize: 11, color: "#9a3412", background: "#fef3c7", padding: "6px", borderRadius: 6 }}>
-                        済: {confirmed.map(d => d.drugName).join("、")}
+                        済: {s.confirmedDrugs.map(d => d.drugName).join("、")}
                       </div>
                     </button>
-                    )
-                  })}
+                  ))}
 
                   {/* 完了済みタブ */}
                   {dashboardTab === "done" && doneList.map((h) => (
@@ -1983,7 +1975,7 @@ function App() {
                       <div style={{ display: "flex", justifyContent: "space-between", alignItems: "flex-start", marginBottom: 12 }}>
                         <div>
                           <div style={{ fontSize: 16, fontWeight: 700, color: C.text, display: "flex", alignItems: "center", gap: 6 }}>
-                            <span style={{ color: C.success }}>✅</span> {h.patient?.name || "不明"}
+                            <span style={{ color: C.success }}>✅</span> {h.patient.name}
                           </div>
                           <div style={{ fontSize: 11, color: C.textMuted, marginTop: 4 }}>
                             完了時点: {new Date(h.completedAt).toLocaleString("ja-JP", { hour12: false })}<br/>
@@ -1993,7 +1985,7 @@ function App() {
                         <div style={{ fontSize: 12, color: C.success, fontWeight: 700, background: C.successLight, padding: "4px 10px", borderRadius: 6 }}>調剤完了</div>
                       </div>
                       <div style={{ fontSize: 11, color: C.textSub, borderTop: `1px dashed ${C.border}`, paddingTop: 10, lineHeight: 1.5 }}>
-                        {(h.drugs || h.confirmedDrugs || []).map((d, idx) => (
+                        {h.drugs.map((d, idx) => (
                           <div key={idx} style={{ display: "flex", justifyContent: "space-between" }}>
                             <span>💊 {d.drugName}</span>
                             <span style={{ color: C.textMuted }}>{d.lot || "-"} / {d.expiry || "-"}</span>
@@ -2005,102 +1997,6 @@ function App() {
                 </div>
               </div>
             )}
-
-            {/* 過去履歴検索モーダル */}
-            {showHistoryModal && (
-              <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.5)", zIndex: 10000, display: "flex", justifyContent: "center", alignItems: "center", padding: 20 }}>
-                <div style={{ background: C.bg, width: "100%", maxWidth: 800, height: "80vh", borderRadius: 16, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 20px 25px -5px rgba(0,0,0,0.1), 0 10px 10px -5px rgba(0,0,0,0.04)" }}>
-                  <div style={{ padding: "20px 24px", borderBottom: `1px solid ${C.border}`, display: "flex", justifyContent: "space-between", alignItems: "center", background: "#f8fafc" }}>
-                    <div style={{ fontSize: 18, fontWeight: 700, color: C.text, display: "flex", alignItems: "center", gap: 8 }}>
-                      📆 過去の調剤履歴の検索
-                    </div>
-                    <button onClick={() => setShowHistoryModal(false)} style={{ background: "transparent", border: "none", fontSize: 24, cursor: "pointer", color: C.textMuted }}>×</button>
-                  </div>
-                  
-                  <div style={{ padding: "16px 24px", display: "flex", gap: 12, alignItems: "center", background: "#fff", borderBottom: `1px solid ${C.border}` }}>
-                    <span style={{ fontSize: 14, fontWeight: 600, color: C.textSub }}>日付指定:</span>
-                    <input type="date" value={historySearchDate} onChange={(e) => setHistorySearchDate(e.target.value)} style={{ padding: "10px 14px", borderRadius: 8, border: "1px solid #cbd5e1", fontSize: 15, outline: "none", fontWeight: 500, cursor: "pointer" }} />
-                    <button onClick={() => setHistorySearchDate("")} style={{ padding: "10px 16px", borderRadius: 8, border: "none", background: historySearchDate === "" ? C.primary : "#f1f5f9", color: historySearchDate === "" ? "#fff" : C.textSub, fontSize: 13, cursor: "pointer", fontWeight: 600 }}>全期間</button>
-                    <span style={{ fontSize: 12, color: C.textMuted, marginLeft: "auto" }}>表示: {historySearchResults.length}件</span>
-                  </div>
-
-                  <div style={{ flex: 1, overflowY: "auto", padding: "0 24px 20px 24px", background: "#f1f5f9" }}>
-                    <div style={{ marginTop: 20, display: "flex", flexDirection: "column", gap: 12 }}>
-                      {historySearchResults.length === 0 ? (
-                        <div style={{ textAlign: "center", padding: "60px 0", color: C.textMuted }}>指定された日付の調剤履歴はありません。</div>
-                      ) : (
-                        historySearchResults.map(h => (
-                          <div key={h.id} style={{ ...cardStyle, padding: "16px 20px", display: "flex", justifyContent: "space-between", cursor: "pointer", transition: "all 0.15s", background: "#fff" }} onClick={() => setSelectedHistoryRecord(h)} onMouseEnter={(e) => e.currentTarget.style.borderColor = C.primary} onMouseLeave={(e) => e.currentTarget.style.borderColor = C.border}>
-                            <div>
-                              <div style={{ fontSize: 16, fontWeight: 700, color: C.text }}>✅ {h.patient?.name || "不明"} <span style={{ fontSize: 12, color: C.textMuted, marginLeft: 8, fontWeight: 400 }}>{h.patient?.age}歳 {h.patient?.gender}</span></div>
-                              <div style={{ fontSize: 13, color: C.textSub, marginTop: 8 }}>調剤薬: {(h.drugs || h.confirmedDrugs || []).map(d => d.drugName).join("、")}</div>
-                            </div>
-                            <div style={{ textAlign: "right", fontSize: 12, color: C.textMuted, display: "flex", flexDirection: "column", justifyContent: "center" }}>
-                              <div style={{ fontWeight: 600, color: C.textSub, marginBottom: 4 }}>{new Date(h.completedAt).toLocaleString("ja-JP", { month: "short", day: "numeric", hour: "2-digit", minute: "2-digit" })}</div>
-                              <div>担当: {h.operator}</div>
-                              <div style={{ marginTop: 8, background: C.bg, padding: "4px 8px", borderRadius: 6, display: "inline-block", fontSize: 11, border: `1px solid ${C.border}`, color: C.primary, fontWeight: 600 }}>▶ 詳細を見る</div>
-                            </div>
-                          </div>
-                        ))
-                      )}
-                    </div>
-                  </div>
-                </div>
-              </div>
-            )}
-
-            {/* 履歴詳細モーダル */}
-            {selectedHistoryRecord && (
-              <div style={{ position: "fixed", top: 0, left: 0, right: 0, bottom: 0, backgroundColor: "rgba(0,0,0,0.6)", zIndex: 10001, display: "flex", justifyContent: "center", alignItems: "center", padding: 20 }} onClick={() => setSelectedHistoryRecord(null)}>
-                <div style={{ background: "#fff", width: "100%", maxWidth: 600, maxHeight: "90vh", borderRadius: 16, display: "flex", flexDirection: "column", overflow: "hidden", boxShadow: "0 25px 50px -12px rgba(0,0,0,0.25)" }} onClick={(e) => e.stopPropagation()}>
-                  <div style={{ padding: "20px 24px", background: C.success, color: "#fff", display: "flex", justifyContent: "space-between", alignItems: "center" }}>
-                    <div style={{ fontSize: 18, fontWeight: 700 }}>処方詳細: {selectedHistoryRecord.patient?.name} 様</div>
-                    <button onClick={() => setSelectedHistoryRecord(null)} style={{ background: "transparent", border: "none", fontSize: 24, cursor: "pointer", color: "#fff", opacity: 0.8 }}>×</button>
-                  </div>
-                  
-                  <div style={{ padding: "24px", overflowY: "auto", flex: 1 }}>
-                    <div style={{ display: "grid", gridTemplateColumns: "1fr 1fr", gap: 16, marginBottom: 24, background: "#f8fafc", padding: 16, borderRadius: 12 }}>
-                      <div>
-                        <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 4 }}>患者情報</div>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{selectedHistoryRecord.patient?.age}歳 {selectedHistoryRecord.patient?.gender}</div>
-                      </div>
-                      <div>
-                        <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 4 }}>完了日時</div>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{new Date(selectedHistoryRecord.completedAt).toLocaleString("ja-JP")}</div>
-                      </div>
-                      <div>
-                        <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 4 }}>担当薬剤師</div>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: C.text }}>{selectedHistoryRecord.operator}</div>
-                      </div>
-                      <div>
-                        <div style={{ fontSize: 11, color: C.textMuted, marginBottom: 4 }}>状態</div>
-                        <div style={{ fontSize: 14, fontWeight: 600, color: C.success }}>✅ 全ての秤量と監査完了</div>
-                      </div>
-                    </div>
-
-                    <div style={{ fontSize: 14, fontWeight: 700, color: C.textSub, marginBottom: 12, borderBottom: `2px solid ${C.border}`, paddingBottom: 8 }}>調剤された薬品リスト</div>
-                    <div style={{ display: "flex", flexDirection: "column", gap: 10 }}>
-                      {(selectedHistoryRecord.drugs || selectedHistoryRecord.confirmedDrugs || []).map((d, i) => (
-                        <div key={i} style={{ display: "flex", justifyContent: "space-between", alignItems: "center", padding: "12px 16px", background: "#f8fafc", borderRadius: 8, border: `1px solid ${C.border}` }}>
-                          <div>
-                            <div style={{ fontSize: 15, fontWeight: 700, color: C.text }}>💊 {d.drugName}</div>
-                            <div style={{ fontSize: 12, color: C.textSub, marginTop: 4 }}>目標量: <span style={{ fontWeight: 600 }}>{d.targetWeight?.toFixed(3) || "記録なし"}g</span></div>
-                          </div>
-                          <div style={{ textAlign: "right" }}>
-                            <div style={{ fontSize: 12, color: C.textMuted, fontFamily: "monospace", padding: "4px 8px", background: "#e2e8f0", borderRadius: 6, display: "inline-block", marginBottom: 4 }}>LOT: {d.lot || "-"}</div>
-                            <div style={{ fontSize: 12, color: C.textMuted }}>使用期限: <span style={{ fontWeight: 600, color: C.text }}>{d.expiry || "-"}</span></div>
-                          </div>
-                        </div>
-                      ))}
-                    </div>
-                  </div>
-                  <div style={{ padding: "16px 24px", background: "#f8fafc", borderTop: `1px solid ${C.border}`, textAlign: "right" }}>
-                    <button onClick={() => setSelectedHistoryRecord(null)} style={{ padding: "10px 24px", background: C.textSub, color: "#fff", border: "none", borderRadius: 8, fontSize: 14, fontWeight: 600, cursor: "pointer" }}>閉じる</button>
-                  </div>
-                </div>
-              </div>
-            )}
-
 
             {/* 患者情報バー + 進捗 + 処方一覧 */}
             {selectedPatient && step !== STEPS.SELECT_PATIENT && (
@@ -2580,5 +2476,3 @@ function GS1Tester({ drugMaster }) {
 }
 ReactDOM.createRoot(document.getElementById("root")).render(React.createElement(App));
 </script>
-</body>
-</html>

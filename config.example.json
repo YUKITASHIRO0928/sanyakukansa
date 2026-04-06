@@ -1,0 +1,7 @@
+{
+  "storeName": "○○薬局 本店",
+  "watchDir": "\\\\ELIXIR1\\Senddata\\SIPS3\\DATA",
+  "watchDir2": "\\\\ELIXIR1\\Senddata\\SIPS1\\JAHISCZK",
+  "port": 3456,
+  "pollInterval": 300
+}

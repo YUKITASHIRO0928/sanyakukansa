@@ -103,7 +103,7 @@ function lookupHotMaster(gtin) {
 // 例: https://raw.githubusercontent.com/yourname/dispensing-app/main/index.html
 const GITHUB_INDEX_URL = "https://raw.githubusercontent.com/YUKITASHIRO0928/sanyakukansa/main/index.html";
 const GITHUB_SERVER_URL = "https://raw.githubusercontent.com/YUKITASHIRO0928/sanyakukansa/main/server.js";
-const AUTO_UPDATE = true;      // false にすると自動更新を無効化
+const AUTO_UPDATE = false;      // false にすると自動更新を無効化
 
 // dataフォルダ作成
 if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
